@@ -218,3 +218,27 @@ Each button sends a postback action text that the webhook recognizes:
 8. Rich menu creation
 9. Remove single-user `.env` config (LINE_USER_ID, GEMINI_API_KEY)
 10. Testing with 2+ accounts
+
+---
+
+## 12. Reliability & quality improvements (from v1 review)
+
+These issues were identified during v1 testing and should be addressed in v2:
+
+1. **Token expiry notification** — If Google token refresh fails 3x in a row,
+   send the user a LINE message: "Google Health disconnected — please re-authorize."
+2. **Chat history cleanup** — Periodic trim: keep last 500 messages per user,
+   archive or delete older ones. Run monthly via scheduler.
+3. **Insights table cleanup** — Same as above; VACUUM annually.
+4. **Error notification** — If daily summary or sync fails repeatedly, notify
+   the user via LINE rather than silently failing.
+5. **Duplicate food log prevention** — Store a dedup key (image message ID) to
+   prevent re-logging the same photo on LINE webhook retry.
+6. **Google token refresh race** — Use file locking or DB-stored tokens (v2
+   already plans DB-stored tokens, which solves this).
+7. **Delete confirmation** — Before executing `[DELETE_LAST]`, the coach should
+   ask "Delete X — are you sure?" and only act on confirmation.
+8. **Workout plan auto-progression** — Track current week number; auto-advance
+   weekly and adjust the daily summary to reference the correct week's schedule.
+9. **Food photo context in chat** — Store the food analysis result as a chat
+   message so the coach can reference "what you just ate" in follow-up questions.

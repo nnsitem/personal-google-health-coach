@@ -28,11 +28,12 @@ def run_auth_flow() -> None:
     flow = InstalledAppFlow.from_client_secrets_file(
         str(GOOGLE_CLIENT_SECRET_FILE), scopes=GOOGLE_HEALTH_SCOPES
     )
-    # open_browser=False so this works inside a container: the URL is printed,
-    # you open it on the host, and the redirect lands on localhost:8765 which
-    # is port-mapped into the container.
+    # When running in Docker, bind to 0.0.0.0 so the port-mapped redirect
+    # can reach the server. Detect via COACH_DATA_DIR=/app/data (set in Dockerfile).
+    import os
+    host = "0.0.0.0" if os.environ.get("COACH_DATA_DIR") == "/app/data" else "localhost"
     creds = flow.run_local_server(
-        host="localhost", port=8765, open_browser=False,
+        host=host, port=8765, open_browser=False,
         authorization_prompt_message="\nOpen this URL in your browser:\n{url}\n",
     )
     GOOGLE_TOKEN_FILE.write_text(creds.to_json())
