@@ -51,6 +51,9 @@ Special abilities (use these directives on their own line at the END of your rep
 - To save a fact/preference: [MEMORY: key = value]
 - To create a workout plan when the user asks for one: [CREATE_PLAN: brief description of what they want]
   After emitting this, tell the user you're putting together their plan and will share it.
+- To delete the user's most recent food or drink log when they ask (e.g. "delete that", "remove my last meal", "ลบรายการล่าสุด"):
+  [DELETE_LAST: food] for a meal, or [DELETE_LAST: drink] for a drink.
+  After emitting this, confirm you're removing it.
 """
 
 
@@ -207,19 +210,20 @@ def _build_context_message() -> str:
 
     parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({TZ})"]
 
+    # Compact JSON (no indent) — saves prompt tokens on every message.
     if metrics:
-        parts.append(f"Recent metrics (last 7 days):\n{json.dumps(metrics, indent=2)}")
+        parts.append(f"Recent metrics (last 7 days): {json.dumps(metrics, separators=(',', ':'))}")
     if sleep:
-        parts.append(f"Recent sleep:\n{json.dumps(sleep, indent=2)}")
+        parts.append(f"Recent sleep: {json.dumps(sleep, separators=(',', ':'))}")
     if goals:
-        parts.append(f"User goals: {json.dumps(goals)}")
+        parts.append(f"User goals: {json.dumps(goals, separators=(',', ':'))}")
     if memory:
-        parts.append(f"Coach memory: {json.dumps(memory)}")
+        parts.append(f"Coach memory: {json.dumps(memory, separators=(',', ':'))}")
 
     # Include active workout plan if one exists
     plan = get_current_plan()
     if plan:
-        parts.append(f"Active workout plan: {json.dumps(plan)}")
+        parts.append(f"Active workout plan: {json.dumps(plan, separators=(',', ':'))}")
 
     return "\n\n".join(parts)
 
@@ -292,8 +296,8 @@ def handle_message(user_text: str) -> str:
     if not reply:
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
 
-    # Extract and process directives (memory + plan creation)
-    reply, plan_request = _process_directives(reply)
+    # Extract and process directives (memory + plan creation + delete)
+    reply, plan_request, delete_kind = _process_directives(reply)
 
     # If the coach requested a plan, create it and append a formatted summary
     if plan_request:
@@ -309,6 +313,18 @@ def handle_message(user_text: str) -> str:
         except Exception:
             log.exception("failed to create workout plan")
             reply = reply + "\n\n(ขออภัย ยังสร้างแผนไม่สำเร็จ ลองใหม่อีกครั้งนะครับ)"
+
+    # If the coach requested a deletion, remove the last log
+    if delete_kind:
+        try:
+            from coach.food import delete_last_log
+            deleted = delete_last_log(delete_kind)
+            if deleted:
+                reply = reply + f"\n\n🗑️ ({deleted})"
+            else:
+                reply = reply + "\n\n(ไม่พบรายการล่าสุดให้ลบ หรือยังลบไม่สำเร็จ)"
+        except Exception:
+            log.exception("failed to delete last log")
 
     # Store coach reply
     _save_chat_message("coach", reply)
@@ -342,16 +358,17 @@ def _format_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
-def _process_directives(text: str) -> tuple[str, str | None]:
-    """Extract [MEMORY: ...] and [CREATE_PLAN: ...] directives from the reply.
+def _process_directives(text: str) -> tuple[str, str | None, str | None]:
+    """Extract [MEMORY: ...], [CREATE_PLAN: ...] and [DELETE_LAST: ...] directives.
 
-    Returns (cleaned_text, plan_request_or_None).
-    Memory directives are saved immediately; plan requests are returned for the
-    caller to handle (since plan creation is a slower operation).
+    Returns (cleaned_text, plan_request_or_None, delete_kind_or_None).
+    Memory directives are saved immediately; plan/delete requests are returned
+    for the caller to handle (slower operations).
     """
     lines = text.split("\n")
     clean_lines = []
     plan_request = None
+    delete_kind = None
 
     for line in lines:
         stripped = line.strip()
@@ -364,10 +381,14 @@ def _process_directives(text: str) -> tuple[str, str | None]:
         elif stripped.startswith("[CREATE_PLAN:") and stripped.endswith("]"):
             plan_request = stripped[13:-1].strip()
             log.info("plan creation requested: %s", plan_request)
+        elif stripped.startswith("[DELETE_LAST:") and stripped.endswith("]"):
+            kind = stripped[13:-1].strip().lower()
+            delete_kind = "drink" if "drink" in kind else "food"
+            log.info("delete requested: %s", delete_kind)
         else:
             clean_lines.append(line)
 
-    return "\n".join(clean_lines).strip(), plan_request
+    return "\n".join(clean_lines).strip(), plan_request, delete_kind
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 
 from coach import db
 from coach.config import LINE_CHANNEL_SECRET, LINE_USER_ID, TZ
@@ -109,8 +109,50 @@ def _valid_line_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def _detect_image_mime(data: bytes) -> str:
+    """Sniff the image mime type from magic bytes (LINE images vary)."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"  # sensible default
+
+
+def _process_text_message(user_id: str, text: str) -> None:
+    from coach.line import send_text as push_text
+    log.info("LINE message from %s: %s", user_id, text)
+    try:
+        reply = handle_message(text)
+        push_text(reply, to=user_id)
+        log.info("replied via LINE push: %s", reply[:80])
+    except Exception:
+        log.exception("failed to handle LINE message")
+
+
+def _process_image_message(user_id: str, message_id: str) -> None:
+    from coach.line import send_text as push_text, get_image_content
+    from coach.food import handle_food_photo
+    log.info("LINE image from %s (id=%s) — analyzing", user_id, message_id)
+    try:
+        image_bytes = get_image_content(message_id)
+        mime = _detect_image_mime(image_bytes)
+        reply = handle_food_photo(image_bytes, mime_type=mime)
+        push_text(reply, to=user_id)
+        log.info("photo processed: %s", reply[:80])
+    except Exception:
+        log.exception("failed to handle photo")
+        try:
+            push_text("Sorry, I couldn't analyze that photo. Please try again. 🙏", to=user_id)
+        except Exception:
+            pass
+
+
 @app.post("/webhook")
-async def line_webhook(request: Request):
+async def line_webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     signature = request.headers.get("X-Line-Signature", "")
 
@@ -120,10 +162,13 @@ async def line_webhook(request: Request):
     payload = json.loads(body)
     events = payload.get("events", [])
 
-    from coach.line import send_text as push_text
-
     for event in events:
         if event.get("type") != "message":
+            continue
+
+        # Skip redelivered events to avoid duplicate processing
+        if event.get("deliveryContext", {}).get("isRedelivery"):
+            log.info("skipping redelivered event")
             continue
 
         msg = event.get("message", {})
@@ -135,29 +180,12 @@ async def line_webhook(request: Request):
             log.warning("dropping message from unknown user %s", user_id)
             continue
 
+        # Process in the background so we return 200 to LINE immediately
+        # (Gemini calls take several seconds; slow webhooks get retried/disabled).
         if msg_type == "text":
-            text = msg["text"]
-            log.info("LINE message from %s: %s", user_id, text)
-            try:
-                reply = handle_message(text)
-                push_text(reply, to=user_id)
-                log.info("replied via LINE push: %s", reply[:80])
-            except Exception:
-                log.exception("failed to handle LINE message")
-
+            background_tasks.add_task(_process_text_message, user_id, msg["text"])
         elif msg_type == "image":
-            message_id = msg.get("id", "")
-            log.info("LINE image from %s (id=%s) — analyzing food", user_id, message_id)
-            try:
-                from coach.line import get_image_content
-                from coach.food import handle_food_photo
-                image_bytes = get_image_content(message_id)
-                reply = handle_food_photo(image_bytes)
-                push_text(reply, to=user_id)
-                log.info("food photo processed: %s", reply[:80])
-            except Exception:
-                log.exception("failed to handle food photo")
-                push_text("ขออภัยครับ วิเคราะห์รูปอาหารไม่สำเร็จ ลองใหม่อีกครั้งนะครับ 🙏", to=user_id)
+            background_tasks.add_task(_process_image_message, user_id, msg.get("id", ""))
 
     return {"ok": True}
 

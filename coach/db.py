@@ -70,8 +70,11 @@ CREATE TABLE IF NOT EXISTS sync_log (
 
 @contextmanager
 def connect():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout + busy_timeout: wait up to 30s if another writer holds the lock
+    # (scheduler threads + webhook background tasks can write concurrently).
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         yield conn
         conn.commit()
@@ -79,9 +82,27 @@ def connect():
         conn.close()
 
 
-def init_db() -> None:
+# Schema creation only needs to run once per process (CREATE TABLE IF NOT EXISTS
+# on every message/job is wasted work). WAL is a persistent DB property set once.
+_initialized = False
+
+# Indexes for the tables that grow over time and are queried by ts / kind.
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_chat_messages_ts ON chat_messages(ts);
+CREATE INDEX IF NOT EXISTS idx_insights_kind_ts ON insights(kind, ts);
+CREATE INDEX IF NOT EXISTS idx_sync_log_ts ON sync_log(ts);
+"""
+
+
+def init_db(force: bool = False) -> None:
+    global _initialized
+    if _initialized and not force:
+        return
     with connect() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")  # persistent; set once is enough
         conn.executescript(SCHEMA)
+        conn.executescript(_INDEXES)
+    _initialized = True
 
 
 def upsert_metric(day: str, hour: int | None, data_type: str, value, source: str = "") -> None:

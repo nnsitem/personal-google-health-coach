@@ -145,7 +145,7 @@ def generate_weekly_report(snapshot: dict | None = None) -> str:
 
     user_message = (
         "Here is my complete health data for the past week:\n\n"
-        f"```json\n{json.dumps(snapshot, indent=2)}\n```\n\n"
+        f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
         "Generate my weekly health report."
     )
 

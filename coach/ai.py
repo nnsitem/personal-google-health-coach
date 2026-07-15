@@ -214,7 +214,7 @@ def generate_daily_summary(snapshot: dict | None = None) -> str:
 
     user_message = (
         "Here is my health data snapshot for today's briefing:\n\n"
-        f"```json\n{json.dumps(snapshot, indent=2)}\n```\n\n"
+        f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
         "Generate my complete daily morning health briefing. "
         "Include sleep recap, activity recap, and a motivational closing. "
         "Keep it under 900 characters total."

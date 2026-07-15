@@ -29,8 +29,8 @@ Respond with ONLY a JSON object (no markdown, no prose).
 If it's FOOD, use this shape:
 {
   "type": "food",
-  "food_name": "short human-readable name of the meal/food",
-  "meal_type": "BREAKFAST | LUNCH | DINNER | SNACK | UNKNOWN",
+  "food_name_en": "short food/meal name in ENGLISH",
+  "food_name_local": "the same name in the user's language",
   "confidence": "high | medium | low",
   "calories_kcal": number,
   "protein_g": number,
@@ -42,7 +42,8 @@ If it's FOOD, use this shape:
 If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
 {
   "type": "drink",
-  "drink_name": "short name, e.g. 'water bottle', 'glass of water', 'iced coffee'",
+  "drink_name_en": "short drink name in ENGLISH (e.g. 'water bottle', 'iced coffee')",
+  "drink_name_local": "the same name in the user's language",
   "confidence": "high | medium | low",
   "volume_ml": number,
   "is_water": true or false,
@@ -55,18 +56,19 @@ size and how full it looks. If you can't tell what it is, set "type" to "unknown
 """
 
 
-# Meal type helper: infer from local time if the model returns UNKNOWN
+# Meal type based on the local log time (authoritative — a photo can't reliably
+# tell breakfast from lunch, but the clock can).
 def _infer_meal_type(now: datetime) -> str:
     h = now.hour
-    if 4 <= h < 11:
-        return "BREAKFAST"
-    if 11 <= h < 15:
-        return "LUNCH"
-    if 15 <= h < 18:
-        return "SNACK"
-    if 18 <= h < 23:
-        return "DINNER"
-    return "SNACK"
+    if 5 <= h < 11:
+        return "BREAKFAST"     # 05:00–11:00
+    if 11 <= h < 14:
+        return "LUNCH"         # 11:00–14:00
+    if 14 <= h < 17:
+        return "SNACK"         # 14:00–17:00 (afternoon snack)
+    if 17 <= h < 21:
+        return "DINNER"        # 17:00–21:00
+    return "SNACK"             # late night / early morning
 
 
 def _get_language() -> str:
@@ -105,10 +107,12 @@ def analyze_food_image(image_bytes: bytes, mime_type: str = "image/jpeg",
     client = genai.Client(api_key=GEMINI_API_KEY)
     image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
-    # Ask the model to return the human-readable text fields in the user's language
+    # The '*_en' name must be English (used for the Google Health log); the
+    # '*_local' name and 'notes' must be in the user's language (for the reply).
     prompt = FOOD_VISION_PROMPT + (
-        f"\n\nWrite the 'food_name'/'drink_name' and 'notes' fields in {language}. "
-        "Keep all JSON keys and enum values (type, meal_type) exactly as specified in English."
+        f"\n\nThe user's language is {language}. Write '*_local' fields and 'notes' "
+        f"in {language}. Always keep '*_en' fields in English, and keep all JSON keys "
+        "and the 'type' value exactly as specified in English."
     )
 
     models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
@@ -163,9 +167,8 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
 
     Logged as anonymous food (manual nutrients + energy + macros).
     """
-    meal_type = analysis.get("meal_type", "UNKNOWN")
-    if meal_type not in ("BREAKFAST", "LUNCH", "DINNER", "SNACK"):
-        meal_type = _infer_meal_type(now)
+    # Always derive meal type from the actual log time.
+    meal_type = _infer_meal_type(now)
 
     interval, _ = _interval_now()
 
@@ -174,9 +177,16 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
     carbs = float(analysis.get("total_carbohydrate_g") or 0)
     fat = float(analysis.get("total_fat_g") or 0)
 
+    # English name for the Google Health log (falls back to local, then generic)
+    food_name_en = (
+        analysis.get("food_name_en")
+        or analysis.get("food_name_local")
+        or "logged meal"
+    )
+
     # NutritionLog anonymous-food payload. Energy in kcal, macros in grams.
     nutrition_log = {
-        "foodDisplayName": analysis.get("food_name", "logged meal")[:100],
+        "foodDisplayName": food_name_en[:100],
         "mealType": meal_type,
         "interval": interval,
         "energy": {"kcal": calories},
@@ -187,7 +197,12 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
         ],
     }
 
-    return {"nutritionLog": nutrition_log}
+    return {
+        # MANUAL = user-entered; more accurate than UNKNOWN and may surface a
+        # timeline card in the Google Health app.
+        "dataSource": {"recordingMethod": "MANUAL"},
+        "nutritionLog": nutrition_log,
+    }
 
 
 def _interval_now() -> tuple[dict, datetime]:
@@ -212,10 +227,11 @@ def _build_hydration_datapoint(analysis: dict) -> dict:
     interval, _ = _interval_now()
     volume_ml = float(analysis.get("volume_ml") or 0)
     return {
+        "dataSource": {"recordingMethod": "MANUAL"},
         "hydrationLog": {
             "interval": interval,
             "amountConsumed": {"milliliters": volume_ml},
-        }
+        },
     }
 
 
@@ -230,7 +246,8 @@ def log_food_to_health(analysis: dict) -> bool:
     try:
         client = HealthClient()
         client.create_data_point("nutrition-log", data_point)
-        log.info("logged nutrition to Google Health: %s", analysis.get("food_name"))
+        log.info("logged nutrition to Google Health: %s",
+                 analysis.get("food_name_en") or analysis.get("food_name_local"))
         return True
     except HealthAPIError as e:
         log.error("failed to write nutrition-log to Google Health: %s", e)
@@ -259,6 +276,62 @@ def _store_food_log(analysis: dict, synced: bool) -> None:
         )
 
 
+def delete_last_log(kind: str = "food") -> str | None:
+    """Delete the most recent nutrition-log or hydration-log entry from Google Health.
+
+    kind: 'food' -> nutrition-log, 'drink' -> hydration-log.
+    Returns the display name of what was deleted, or None if nothing found/failed.
+    """
+    from datetime import date, timedelta
+    data_type = "hydration-log" if kind == "drink" else "nutrition-log"
+    field = data_type.replace("-", "_")
+
+    today = date.today()
+    start = (today - timedelta(days=2)).isoformat()
+    end = (today + timedelta(days=1)).isoformat()
+    filter_str = (
+        f'{field}.interval.civil_start_time >= "{start}" '
+        f'AND {field}.interval.civil_start_time < "{end}"'
+    )
+
+    try:
+        client = HealthClient()
+        points = client.list_points(data_type, filter_str)
+    except HealthAPIError as e:
+        log.error("failed to list %s for delete: %s", data_type, e)
+        return None
+
+    if not points:
+        return None
+
+    # Points are returned newest-first (ordered by interval start desc).
+    newest = points[0]
+    name = newest.get("name")
+    if not name:
+        return None
+
+    # Extract a display label for the confirmation message
+    payload = newest.get(_camel(field), {})
+    if data_type == "nutrition-log":
+        label = payload.get("foodDisplayName", "last meal")
+    else:
+        ml = payload.get("amountConsumed", {}).get("milliliters", "")
+        label = f"{round(float(ml))} ml" if ml != "" else "last drink"
+
+    try:
+        client.batch_delete_data_points(data_type, [name])
+        log.info("deleted %s data point: %s (%s)", data_type, name, label)
+        return label
+    except HealthAPIError as e:
+        log.error("failed to delete %s: %s", data_type, e)
+        return None
+
+
+def _camel(snake: str) -> str:
+    parts = snake.split("_")
+    return parts[0] + "".join(p.title() for p in parts[1:])
+
+
 # Localized labels for the reply messages
 LABELS = {
     "en": {
@@ -272,6 +345,8 @@ LABELS = {
         "synced_drink": "✅ Hydration logged to Google Health",
         "not_synced": "⚠️ Analyzed, but couldn't save to Google Health",
         "low_conf": "(Estimate may be off — try a clearer photo for better accuracy)",
+        "empty_drink": "🥤 This looks like an empty container, so I didn't log any hydration. Send a photo with a drink in it and I'll track it!",
+        "empty_food": "🍽️ I couldn't estimate a real portion here, so nothing was logged. Try a clearer photo of the food.",
     },
     "th": {
         "unclear": "🤔 ผมดูรูปนี้แล้วไม่แน่ใจว่าเป็นอาหารหรือเครื่องดื่ม ลองถ่ายให้ชัดขึ้นอีกนิดได้ไหมครับ?",
@@ -284,6 +359,8 @@ LABELS = {
         "synced_drink": "✅ บันทึกการดื่มน้ำลง Google Health แล้ว",
         "not_synced": "⚠️ วิเคราะห์สำเร็จ แต่ยังบันทึกลง Google Health ไม่ได้",
         "low_conf": "(ค่าประมาณอาจคลาดเคลื่อน ลองถ่ายชัด ๆ อีกครั้ง)",
+        "empty_drink": "🥤 ดูเหมือนแก้ว/ขวดจะว่างเปล่า ผมเลยยังไม่ได้บันทึกนะครับ ถ้ามีน้ำอยู่ในภาพ ส่งมาใหม่ได้เลยครับ",
+        "empty_food": "🍽️ ผมประเมินปริมาณอาหารไม่ได้ เลยยังไม่บันทึกครับ ลองถ่ายอาหารให้ชัดขึ้นอีกนิดนะครับ",
     },
 }
 
@@ -309,11 +386,18 @@ def handle_food_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
 
 
 def _handle_food(analysis: dict, labels: dict) -> str:
+    cal = round(float(analysis.get("calories_kcal") or 0))
+
+    # Don't log if there's no real portion (e.g. empty plate / not food)
+    if cal <= 0:
+        log.info("food calories is 0 — skipping nutrition log")
+        return labels["empty_food"]
+
     synced = log_food_to_health(analysis)
     _store_food_log(analysis, synced)
 
-    name = analysis.get("food_name", "meal")
-    cal = round(float(analysis.get("calories_kcal") or 0))
+    # Show the localized name in the reply, English as fallback
+    name = analysis.get("food_name_local") or analysis.get("food_name_en") or "meal"
     protein = round(float(analysis.get("protein_g") or 0))
     carbs = round(float(analysis.get("total_carbohydrate_g") or 0))
     fat = round(float(analysis.get("total_fat_g") or 0))
@@ -339,11 +423,17 @@ def _handle_food(analysis: dict, labels: dict) -> str:
 
 
 def _handle_drink(analysis: dict, labels: dict) -> str:
+    ml = round(float(analysis.get("volume_ml") or 0))
+
+    # Don't log an empty container
+    if ml <= 0:
+        log.info("drink volume is 0 — skipping hydration log")
+        return labels["empty_drink"]
+
     synced = log_hydration_to_health(analysis)
     _store_food_log(analysis, synced)
 
-    name = analysis.get("drink_name", "drink")
-    ml = round(float(analysis.get("volume_ml") or 0))
+    name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
     cal = round(float(analysis.get("calories_kcal") or 0))
     confidence = analysis.get("confidence", "medium")
 

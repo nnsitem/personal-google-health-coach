@@ -137,6 +137,17 @@ class HealthClient:
             data_point,
         )
 
+    def batch_delete_data_points(self, data_type: str, names: list[str]) -> dict:
+        """Delete data points by their resource names. Requires a *.writeonly scope.
+
+        names: full resource names, e.g.
+          'users/me/dataTypes/nutrition-log/dataPoints/{id}'
+        """
+        return self._post(
+            f"users/me/dataTypes/{data_type}/dataPoints:batchDelete",
+            {"names": names},
+        )
+
     def reconcile(self, data_type: str, start_iso: str, end_iso: str) -> list[dict]:
         """Merged-across-devices stream (matches what the Google Health app shows).
 
