@@ -36,7 +36,14 @@ def _civil_date(d: date | str) -> dict:
 
 
 class HealthClient:
-    def __init__(self, token_json: str | None = None):
+    def __init__(self, token_json: str | None = None, allow_default_credentials: bool = False):
+        """token_json: the user's own OAuth token (required for user-scoped calls).
+
+        allow_default_credentials=True opts in to the v1 file-based token
+        (data/google_token.json) — for owner-run CLI tools only. It must never
+        be used on a per-user code path: falling back silently would read from
+        or write to the OWNER's Google Health account on another user's behalf.
+        """
         if token_json:
             import json as _json
             from google.oauth2.credentials import Credentials
@@ -46,8 +53,10 @@ class HealthClient:
             if self._creds.expired and self._creds.refresh_token:
                 from google.auth.transport.requests import Request
                 self._creds.refresh(Request())
-        else:
+        elif allow_default_credentials:
             self._creds = get_credentials()
+        else:
+            raise HealthAPIError(401, "no Google token for this user (re-authorize with 'login')", "local")
         self._session = requests.Session()
 
     def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> dict:

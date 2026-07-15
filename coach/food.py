@@ -299,9 +299,12 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
         f'AND {field}.interval.civil_start_time < "{end}"'
     )
 
+    user = db.get_user(user_id)
+    token_json = (user.get("google_token_json") if user else None) or None
+    if not token_json:
+        log.warning("user %s has no Google token — cannot delete %s", user_id, data_type)
+        return None
     try:
-        user = db.get_user(user_id)
-        token_json = (user.get("google_token_json") if user else None) or None
         client = HealthClient(token_json=token_json)
         points = client.list_points(data_type, filter_str)
     except HealthAPIError as e:

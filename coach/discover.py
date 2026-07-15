@@ -32,7 +32,8 @@ KNOWN_DATA_TYPES = [
 
 
 def main() -> None:
-    client = HealthClient()
+    # Owner-run CLI smoke test — the file-based v1 token is intentional here.
+    client = HealthClient(allow_default_credentials=True)
 
     print("Testing connection with 'steps' dailyRollUp (yesterday)...\n")
     try:

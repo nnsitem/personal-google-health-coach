@@ -272,6 +272,13 @@ def _ensure_configured(user_id: str, user: dict | None) -> bool:
 
 def _handle_gemini_key_input(user_id: str, key: str) -> None:
     """Validate a Gemini API key and store it if valid."""
+    # Cancel must be checked BEFORE the format check — 'cancel' is shorter than
+    # 20 chars, so the other order traps the user in key-setup mode forever.
+    if key.lower() == "cancel":
+        db.update_user(user_id, onboarding_state="")
+        push_text("Key setup cancelled.", to=user_id)
+        return
+
     # Basic format check
     if len(key) < 20 or " " in key or "\n" in key:
         push_text(
@@ -280,11 +287,6 @@ def _handle_gemini_key_input(user_id: str, key: str) -> None:
             "Or send 'cancel' to exit setup.",
             to=user_id,
         )
-        return
-
-    if key.lower() == "cancel":
-        db.update_user(user_id, onboarding_state="")
-        push_text("Key setup cancelled.", to=user_id)
         return
 
     # Validate by making a test call
@@ -388,7 +390,19 @@ async def line_webhook(request: Request, background_tasks: BackgroundTasks):
 
 @app.post("/chat")
 async def chat_endpoint(request: Request):
-    """Direct chat endpoint for local testing. Send JSON: {"message": "...", "user_id": "..."}"""
+    """Direct chat endpoint for local testing. Send JSON: {"message": "...", "user_id": "..."}
+
+    The Cloudflare tunnel forwards ALL paths, so this endpoint is reachable from
+    the public internet — it must never be open. Disabled unless CHAT_TEST_TOKEN
+    is set in the environment AND the request carries it in an X-Chat-Token
+    header. Responds 404 (not 403) so the endpoint's existence isn't advertised.
+    """
+    import os
+    expected = os.environ.get("CHAT_TEST_TOKEN", "")
+    provided = request.headers.get("X-Chat-Token", "")
+    if not expected or not hmac.compare_digest(provided.encode(), expected.encode()):
+        return Response(status_code=404)
+
     body = await request.json()
     text = body.get("message", "")
     user_id = body.get("user_id", "U1068a1b9c15b44e7ff1439bdefdeb5dc")
