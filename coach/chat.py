@@ -226,7 +226,7 @@ def _ensure_fresh_data(user_id: str) -> None:
     try:
         run_sync(user_id)
     except Exception:
-        log.warning("sync before chat failed — proceeding with cached data")
+        log.warning("sync before chat failed — proceeding with cached data", exc_info=True)
 
 def _build_context_message(user_id: str) -> str:
     """Build a context block with current + historical health data for the agent."""

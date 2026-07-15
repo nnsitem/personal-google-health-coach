@@ -154,6 +154,114 @@ def connect():
 _initialized = False
 
 
+# Tables whose PRIMARY KEY changed in v2 to include user_id. SQLite can't ALTER
+# a primary key, so a v1 DB needs these tables rebuilt. (col list = new column order)
+_PK_REBUILD = {
+    "metrics": {
+        "create": """
+            CREATE TABLE metrics (
+                user_id    TEXT NOT NULL DEFAULT '',
+                day        TEXT NOT NULL,
+                hour       INTEGER,
+                data_type  TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                source     TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, day, hour, data_type, source)
+            )
+        """,
+        "cols": "user_id, day, hour, data_type, value_json, source, updated_at",
+    },
+    "sleep_sessions": {
+        "create": """
+            CREATE TABLE sleep_sessions (
+                user_id     TEXT NOT NULL DEFAULT '',
+                start       TEXT NOT NULL,
+                end         TEXT NOT NULL,
+                stages_json TEXT,
+                efficiency  REAL,
+                score       REAL,
+                PRIMARY KEY (user_id, start, end)
+            )
+        """,
+        "cols": "user_id, start, end, stages_json, efficiency, score",
+    },
+    "exercise_sessions": {
+        "create": """
+            CREATE TABLE exercise_sessions (
+                user_id       TEXT NOT NULL DEFAULT '',
+                start         TEXT NOT NULL,
+                end           TEXT NOT NULL,
+                activity_type TEXT,
+                stats_json    TEXT,
+                PRIMARY KEY (user_id, start, end)
+            )
+        """,
+        "cols": "user_id, start, end, activity_type, stats_json",
+    },
+    "goals": {
+        "create": """
+            CREATE TABLE goals (
+                user_id    TEXT NOT NULL DEFAULT '',
+                key        TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, key)
+            )
+        """,
+        "cols": "user_id, key, value_json, updated_at",
+    },
+    "coach_memory": {
+        "create": """
+            CREATE TABLE coach_memory (
+                user_id    TEXT NOT NULL DEFAULT '',
+                name       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, name)
+            )
+        """,
+        "cols": "user_id, name, content, updated_at",
+    },
+}
+
+
+def _user_id_in_pk(conn, table: str) -> bool:
+    """Check whether user_id is part of the table's PRIMARY KEY."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    for r in rows:
+        # r["pk"] > 0 means the column is part of the primary key
+        if r["name"] == "user_id" and r["pk"] > 0:
+            return True
+    return False
+
+
+def _rebuild_pk_tables(conn) -> None:
+    """Rebuild v1 tables whose PK didn't include user_id (SQLite can't ALTER PK).
+
+    Preserves all data (user_id was already backfilled by the ADD COLUMN step).
+    """
+    for table, spec in _PK_REBUILD.items():
+        # Skip if table doesn't exist yet (fresh install already has correct PK)
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        if _user_id_in_pk(conn, table):
+            continue  # already migrated
+
+        log_msg = f"rebuilding {table} to add user_id to primary key"
+        import logging as _logging
+        _logging.getLogger(__name__).info(log_msg)
+
+        cols = spec["cols"]
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+        conn.executescript(spec["create"])
+        conn.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {table}_old")
+        conn.execute(f"DROP TABLE {table}_old")
+
+
 def init_db(force: bool = False) -> None:
     """Create schema + run migration + create indexes. Idempotent."""
     global _initialized
@@ -162,12 +270,14 @@ def init_db(force: bool = False) -> None:
     with connect() as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
-        # Migration: add user_id columns to pre-v2 tables that lack them
+        # Migration step 1: add user_id columns to pre-v2 tables that lack them
         for table, col_def in _ADD_COLUMNS:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
             except sqlite3.OperationalError:
                 pass  # column already exists
+        # Migration step 2: rebuild tables whose PRIMARY KEY must include user_id
+        _rebuild_pk_tables(conn)
         conn.executescript(_INDEXES)
     _initialized = True
 
