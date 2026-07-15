@@ -200,21 +200,58 @@ def save_memory(name: str, content: str) -> None:
 # Agent
 # ---------------------------------------------------------------------------
 
+def _ensure_fresh_data() -> None:
+    """Run a sync if the last successful sync was more than 10 minutes ago.
+
+    This ensures the chat always has reasonably current data without syncing
+    on every single message when messages come in rapid succession.
+    """
+    from datetime import datetime, timedelta, timezone
+    from coach.sync import run_sync
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT ts FROM sync_log WHERE ok = 1 ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+
+    if row and row["ts"] > cutoff:
+        return  # last sync was recent enough
+
+    try:
+        run_sync()
+    except Exception:
+        log.warning("sync before chat failed — proceeding with cached data")
+
 def _build_context_message() -> str:
-    """Build a context block with current health data for the agent."""
+    """Build a context block with current + historical health data for the agent."""
+    from coach.stats import build_trends
+
     now = datetime.now(TZ)
-    metrics = _get_recent_metrics(7)
-    sleep = _get_recent_sleep(7)
     goals = _get_goals()
     memory = _get_coach_memory()
 
     parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({TZ})"]
 
-    # Compact JSON (no indent) — saves prompt tokens on every message.
-    if metrics:
-        parts.append(f"Recent metrics (last 7 days): {json.dumps(metrics, separators=(',', ':'))}")
+    # Multi-window summary: today, yesterday, weekly & monthly averages, trends.
+    # This lets the coach reason about patterns, not just today's snapshot.
+    try:
+        trends = build_trends()
+        parts.append(
+            "Health data (today / yesterday / week_avg / month_avg / trend): "
+            f"{json.dumps(trends, separators=(',', ':'))}"
+        )
+    except Exception:
+        log.exception("failed to build trends; falling back to recent metrics")
+        metrics = _get_recent_metrics(7)
+        if metrics:
+            parts.append(f"Recent metrics (last 7 days): {json.dumps(metrics, separators=(',', ':'))}")
+
+    # Recent raw sleep detail (last 3 nights) for stage-level questions
+    sleep = _get_recent_sleep(3)
     if sleep:
-        parts.append(f"Recent sleep: {json.dumps(sleep, separators=(',', ':'))}")
+        parts.append(f"Recent sleep detail: {json.dumps(sleep, separators=(',', ':'))}")
+
     if goals:
         parts.append(f"User goals: {json.dumps(goals, separators=(',', ':'))}")
     if memory:
@@ -235,6 +272,10 @@ def handle_message(user_text: str) -> str:
     Returns the reply text.
     """
     db.init_db()
+
+    # Always refresh health data before responding so the coach has the latest.
+    # Only skip if the last sync was very recent (< 10 minutes ago).
+    _ensure_fresh_data()
 
     # Store user message
     _save_chat_message("user", user_text)

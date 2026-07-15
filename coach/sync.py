@@ -136,8 +136,8 @@ def run_sync() -> None:
     # Cover trailing days for dailyRollUp (civil dates)
     lookback_days = SYNC_LOOKBACK_HOURS // 24 + 1
     start_date = (today_local - timedelta(days=lookback_days)).isoformat()
-    # end_date is exclusive — use today (not tomorrow) to avoid future-date errors
-    end_date = today_local.isoformat()
+    # end_date is EXCLUSIVE, so use tomorrow to include today's data.
+    end_date = (today_local + timedelta(days=1)).isoformat()
 
     sync_daily_rollups(client, start_date, end_date)
     sync_list_types(client, start_date, end_date)
@@ -145,6 +145,60 @@ def run_sync() -> None:
     log.info("sync complete (%s .. %s)", start_date, end_date)
 
 
+def run_backfill(days: int = 90) -> None:
+    """Backfill historical data so weekly/monthly trends have history immediately.
+
+    dailyRollUp has per-type range limits (14 days for total-calories &
+    active-zone-minutes, 90 for others), so we sync in 14-day chunks to stay safe.
+    list/sleep endpoints accept wider ranges, so those are done in one pass.
+    """
+    db.init_db()
+    client = HealthClient()
+
+    today_local = datetime.now(TZ).date()
+    end = today_local + timedelta(days=1)  # exclusive, includes today
+    start = today_local - timedelta(days=days)
+
+    log.info("backfill starting: %s .. %s (%d days)", start.isoformat(), end.isoformat(), days)
+
+    # dailyRollUp types in 14-day chunks
+    chunk = timedelta(days=14)
+    cursor = start
+    while cursor < end:
+        chunk_end = min(cursor + chunk, end)
+        sync_daily_rollups(client, cursor.isoformat(), chunk_end.isoformat())
+        cursor = chunk_end
+
+    # list + sleep in a single wide range
+    sync_list_types(client, start.isoformat(), end.isoformat())
+    sync_sleep(client, start.isoformat(), end.isoformat())
+
+    log.info("backfill complete (%d days)", days)
+
+
+def _history_days() -> int:
+    """Count how many distinct days of metric data we have stored."""
+    with db.connect() as conn:
+        row = conn.execute("SELECT COUNT(DISTINCT day) AS c FROM metrics").fetchone()
+    return row["c"] if row else 0
+
+
+def backfill_if_sparse(min_days: int = 14, backfill_days: int = 90) -> None:
+    """Run a one-time backfill if we have fewer than `min_days` of history."""
+    try:
+        have = _history_days()
+        if have < min_days:
+            log.info("only %d days of history — running %d-day backfill", have, backfill_days)
+            run_backfill(backfill_days)
+    except Exception:
+        log.exception("backfill_if_sparse failed")
+
+
 if __name__ == "__main__":
+    import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_sync()
+    if len(sys.argv) > 1 and sys.argv[1] == "backfill":
+        days = int(sys.argv[2]) if len(sys.argv) > 2 else 90
+        run_backfill(days)
+    else:
+        run_sync()

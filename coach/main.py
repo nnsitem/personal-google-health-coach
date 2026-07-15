@@ -62,9 +62,21 @@ def _safe_weekly_report() -> None:
         log.exception("weekly report failed")
 
 
+def _safe_backfill() -> None:
+    """One-time historical backfill if the DB is sparse (runs in background)."""
+    try:
+        from coach.sync import backfill_if_sparse
+        backfill_if_sparse(min_days=14, backfill_days=90)
+    except Exception:
+        log.exception("startup backfill failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Backfill history on startup (once) so weekly/monthly trends have data.
+    # Runs in a scheduler one-shot so it doesn't block app startup.
+    scheduler.add_job(_safe_backfill, "date", id="startup_backfill")
     scheduler.add_job(_safe_sync, "cron", minute=5, id="hourly_sync")
     scheduler.add_job(
         _safe_daily_summary, "cron",

@@ -40,6 +40,9 @@ Formatting rules (LINE does NOT support markdown/bold/italic):
 Reference actual numbers from the data. Don't invent stats.
 If data is missing for a metric, skip it gracefully.
 If "todays_workout" is present in the snapshot, mention it in the 🎯 Today's Focus section.
+Use the "trends" data (week_avg, month_avg, and week-over-week trend) to give
+context — e.g. "your steps are up 12% vs last week" or "resting HR is steady
+against your monthly average". This shows you understand the user's patterns.
 """
 
 
@@ -131,6 +134,14 @@ def build_daily_snapshot() -> dict:
         today_workout = get_today_workout()
         if today_workout:
             snapshot["todays_workout"] = today_workout
+    except Exception:
+        pass
+
+    # Include multi-window trends (week/month averages + week-over-week) so the
+    # brief can reference patterns, not just yesterday's numbers.
+    try:
+        from coach.stats import build_trends
+        snapshot["trends"] = build_trends()
     except Exception:
         pass
 
