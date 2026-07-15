@@ -54,7 +54,7 @@ _EXTRACTORS = {
 }
 
 
-def _load_daily_series(days: int) -> dict[str, dict[str, float]]:
+def _load_daily_series(user_id: str, days: int) -> dict[str, dict[str, float]]:
     """Return {data_type: {day: value}} for the last `days` days."""
     today = datetime.now(TZ).date()
     cutoff = (today - timedelta(days=days)).isoformat()
@@ -62,8 +62,8 @@ def _load_daily_series(days: int) -> dict[str, dict[str, float]]:
     series: dict[str, dict[str, float]] = {dt: {} for dt in _EXTRACTORS}
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT day, data_type, value_json FROM metrics WHERE day >= ? ORDER BY day",
-            (cutoff,),
+            "SELECT day, data_type, value_json FROM metrics WHERE user_id = ? AND day >= ? ORDER BY day",
+            (user_id, cutoff),
         ).fetchall()
 
     for row in rows:
@@ -110,15 +110,15 @@ def _trend(this_week: float | None, last_week: float | None) -> str | None:
     return f"{'up' if pct > 0 else 'down'} {abs(round(pct))}% vs last week"
 
 
-def _sleep_series(days: int) -> dict[str, float]:
+def _sleep_series(user_id: str, days: int) -> dict[str, float]:
     """Return {date: total_sleep_hours} for the last `days` days."""
     today = datetime.now(TZ).date()
     cutoff = (today - timedelta(days=days)).isoformat()
     out: dict[str, float] = {}
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT start, end, stages_json FROM sleep_sessions WHERE start >= ? ORDER BY start",
-            (cutoff,),
+            "SELECT start, end, stages_json FROM sleep_sessions WHERE user_id = ? AND start >= ? ORDER BY start",
+            (user_id, cutoff),
         ).fetchall()
     for row in rows:
         stages = json.loads(row["stages_json"]) if row["stages_json"] else []
@@ -141,7 +141,7 @@ def _sleep_series(days: int) -> dict[str, float]:
     return out
 
 
-def build_trends() -> dict:
+def build_trends(user_id: str) -> dict:
     """Build a compact multi-window summary with today, yesterday, weekly and
     monthly averages, and week-over-week trends for each metric.
     """
@@ -149,7 +149,7 @@ def build_trends() -> dict:
     yesterday = today - timedelta(days=1)
     t_iso, y_iso = today.isoformat(), yesterday.isoformat()
 
-    series = _load_daily_series(35)  # enough for month + prior-week comparison
+    series = _load_daily_series(user_id, 35)  # enough for month + prior-week comparison
     out: dict = {"as_of": datetime.now(TZ).strftime("%Y-%m-%d %H:%M")}
 
     labels = {
@@ -172,7 +172,7 @@ def build_trends() -> dict:
         }
 
     # Sleep
-    sleep_map = _sleep_series(35)
+    sleep_map = _sleep_series(user_id, 35)
     this_week_sleep = _window_avg(sleep_map, 7, 0)
     last_week_sleep = _window_avg(sleep_map, 14, 7)
     out["sleep_hours"] = {
@@ -188,4 +188,6 @@ def build_trends() -> dict:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     db.init_db()
-    print(json.dumps(build_trends(), indent=2))
+
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+    print(json.dumps(build_trends(DEFAULT_USER_ID), indent=2))

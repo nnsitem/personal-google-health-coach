@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from google import genai
 
 from coach import db
-from coach.config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
 from coach.plans import create_workout_plan, get_current_plan
 
 log = logging.getLogger(__name__)
@@ -61,13 +61,13 @@ Special abilities (use these directives on their own line at the END of your rep
 # Context builders
 # ---------------------------------------------------------------------------
 
-def _get_recent_metrics(days: int = 7) -> dict:
+def _get_recent_metrics(user_id: str, days: int = 7) -> dict:
     """Get the last N days of health metrics."""
     cutoff = (datetime.now(TZ).date() - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT day, data_type, value_json FROM metrics WHERE day >= ? ORDER BY day DESC",
-            (cutoff,),
+            "SELECT day, data_type, value_json FROM metrics WHERE user_id = ? AND day >= ? ORDER BY day DESC",
+            (user_id, cutoff),
         ).fetchall()
 
     metrics = {}
@@ -94,13 +94,13 @@ def _get_recent_metrics(days: int = 7) -> dict:
     return metrics
 
 
-def _get_recent_sleep(days: int = 7) -> list[dict]:
+def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
     """Get recent sleep sessions summarized."""
     cutoff = (datetime.now(TZ) - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT start, end, stages_json, efficiency, score FROM sleep_sessions WHERE start >= ? ORDER BY start DESC",
-            (cutoff,),
+            "SELECT start, end, stages_json, efficiency, score FROM sleep_sessions WHERE user_id = ? AND start >= ? ORDER BY start DESC",
+            (user_id, cutoff),
         ).fetchall()
 
     sessions = []
@@ -134,65 +134,69 @@ def _get_recent_sleep(days: int = 7) -> list[dict]:
     return sessions
 
 
-def _get_goals() -> dict:
+def _get_goals(user_id: str) -> dict:
     """Load all user goals."""
     with db.connect() as conn:
-        rows = conn.execute("SELECT key, value_json FROM goals").fetchall()
+        rows = conn.execute(
+            "SELECT key, value_json FROM goals WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
     return {row["key"]: json.loads(row["value_json"]) for row in rows}
 
 
-def _get_coach_memory() -> dict:
+def _get_coach_memory(user_id: str) -> dict:
     """Load coach memory (preferences, facts about the user)."""
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT name, content FROM coach_memory ORDER BY updated_at DESC LIMIT 20"
+            "SELECT name, content FROM coach_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20",
+            (user_id,),
         ).fetchall()
     return {row["name"]: row["content"] for row in rows}
 
 
-def _get_chat_history(limit: int = 20) -> list[dict]:
+def _get_chat_history(user_id: str, limit: int = 20) -> list[dict]:
     """Load recent chat messages."""
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT ts, role, text FROM chat_messages ORDER BY ts DESC LIMIT ?",
-            (limit,),
+            "SELECT ts, role, text FROM chat_messages WHERE user_id = ? ORDER BY ts DESC LIMIT ?",
+            (user_id, limit),
         ).fetchall()
     # Return in chronological order
     return [{"role": row["role"], "text": row["text"]} for row in reversed(rows)]
 
 
-def _save_chat_message(role: str, text: str) -> None:
+def _save_chat_message(user_id: str, role: str, text: str) -> None:
     """Store a chat message."""
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (ts, role, text) VALUES (datetime('now'), ?, ?)",
-            (role, text),
+            "INSERT INTO chat_messages (user_id, ts, role, text) VALUES (?, datetime('now'), ?, ?)",
+            (user_id, role, text),
         )
 
 
-def save_goal(key: str, value) -> None:
+def save_goal(user_id: str, key: str, value) -> None:
     """Save or update a user goal."""
     with db.connect() as conn:
         conn.execute(
             """
-            INSERT INTO goals (key, value_json, updated_at)
-            VALUES (?, ?, datetime('now'))
-            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')
+            INSERT INTO goals (user_id, key, value_json, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(user_id, key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')
             """,
-            (key, json.dumps(value)),
+            (user_id, key, json.dumps(value)),
         )
 
 
-def save_memory(name: str, content: str) -> None:
+def save_memory(user_id: str, name: str, content: str) -> None:
     """Save or update a coach memory entry."""
     with db.connect() as conn:
         conn.execute(
             """
-            INSERT INTO coach_memory (name, content, updated_at)
-            VALUES (?, ?, datetime('now'))
-            ON CONFLICT(name) DO UPDATE SET content = excluded.content, updated_at = datetime('now')
+            INSERT INTO coach_memory (user_id, name, content, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(user_id, name) DO UPDATE SET content = excluded.content, updated_at = datetime('now')
             """,
-            (name, content),
+            (user_id, name, content),
         )
 
 
@@ -200,7 +204,7 @@ def save_memory(name: str, content: str) -> None:
 # Agent
 # ---------------------------------------------------------------------------
 
-def _ensure_fresh_data() -> None:
+def _ensure_fresh_data(user_id: str) -> None:
     """Run a sync if the last successful sync was more than 10 minutes ago.
 
     This ensures the chat always has reasonably current data without syncing
@@ -212,43 +216,44 @@ def _ensure_fresh_data() -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT ts FROM sync_log WHERE ok = 1 ORDER BY ts DESC LIMIT 1"
+            "SELECT ts FROM sync_log WHERE user_id = ? AND ok = 1 ORDER BY ts DESC LIMIT 1",
+            (user_id,),
         ).fetchone()
 
     if row and row["ts"] > cutoff:
         return  # last sync was recent enough
 
     try:
-        run_sync()
+        run_sync(user_id)
     except Exception:
         log.warning("sync before chat failed — proceeding with cached data")
 
-def _build_context_message() -> str:
+def _build_context_message(user_id: str) -> str:
     """Build a context block with current + historical health data for the agent."""
     from coach.stats import build_trends
 
     now = datetime.now(TZ)
-    goals = _get_goals()
-    memory = _get_coach_memory()
+    goals = _get_goals(user_id)
+    memory = _get_coach_memory(user_id)
 
     parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({TZ})"]
 
     # Multi-window summary: today, yesterday, weekly & monthly averages, trends.
     # This lets the coach reason about patterns, not just today's snapshot.
     try:
-        trends = build_trends()
+        trends = build_trends(user_id)
         parts.append(
             "Health data (today / yesterday / week_avg / month_avg / trend): "
             f"{json.dumps(trends, separators=(',', ':'))}"
         )
     except Exception:
         log.exception("failed to build trends; falling back to recent metrics")
-        metrics = _get_recent_metrics(7)
+        metrics = _get_recent_metrics(user_id, 7)
         if metrics:
             parts.append(f"Recent metrics (last 7 days): {json.dumps(metrics, separators=(',', ':'))}")
 
     # Recent raw sleep detail (last 3 nights) for stage-level questions
-    sleep = _get_recent_sleep(3)
+    sleep = _get_recent_sleep(user_id, 3)
     if sleep:
         parts.append(f"Recent sleep detail: {json.dumps(sleep, separators=(',', ':'))}")
 
@@ -258,14 +263,14 @@ def _build_context_message() -> str:
         parts.append(f"Coach memory: {json.dumps(memory, separators=(',', ':'))}")
 
     # Include active workout plan if one exists
-    plan = get_current_plan()
+    plan = get_current_plan(user_id)
     if plan:
         parts.append(f"Active workout plan: {json.dumps(plan, separators=(',', ':'))}")
 
     return "\n\n".join(parts)
 
 
-def handle_message(user_text: str) -> str:
+def handle_message(user_id: str, user_text: str) -> str:
     """Process an inbound user message and generate a coach reply.
 
     Stores both the user message and the reply in chat_messages.
@@ -275,14 +280,14 @@ def handle_message(user_text: str) -> str:
 
     # Always refresh health data before responding so the coach has the latest.
     # Only skip if the last sync was very recent (< 10 minutes ago).
-    _ensure_fresh_data()
+    _ensure_fresh_data(user_id)
 
     # Store user message
-    _save_chat_message("user", user_text)
+    _save_chat_message(user_id, "user", user_text)
 
     # Build context
-    context = _build_context_message()
-    history = _get_chat_history(10)  # fewer messages = faster
+    context = _build_context_message(user_id)
+    history = _get_chat_history(user_id, 10)  # fewer messages = faster
 
     # Build conversation for Gemini
     # Format: system context + chat history + current message
@@ -296,12 +301,14 @@ def handle_message(user_text: str) -> str:
     full_prompt = "\n".join(conversation_parts)
 
     # Call Gemini
-    if not GEMINI_API_KEY:
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    if not api_key:
         reply = "I'm not configured yet — GEMINI_API_KEY is missing."
-        _save_chat_message("coach", reply)
+        _save_chat_message(user_id, "coach", reply)
         return reply
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
     models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
     reply = None
 
@@ -338,17 +345,17 @@ def handle_message(user_text: str) -> str:
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
 
     # Extract and process directives (memory + plan creation + delete)
-    reply, plan_request, delete_kind = _process_directives(reply)
+    reply, plan_request, delete_kind = _process_directives(user_id, reply)
 
     # If the coach requested a plan, create it and append a formatted summary
     if plan_request:
         try:
             context_dict = {
-                "metrics": _get_recent_metrics(7),
-                "sleep": _get_recent_sleep(7),
-                "goals": _get_goals(),
+                "metrics": _get_recent_metrics(user_id, 7),
+                "sleep": _get_recent_sleep(user_id, 7),
+                "goals": _get_goals(user_id),
             }
-            plan = create_workout_plan(plan_request, context_dict)
+            plan = create_workout_plan(user_id, plan_request, context_dict)
             reply = reply + "\n\n" + _format_plan(plan)
             log.info("created workout plan: %s", plan.get("name", "unnamed"))
         except Exception:
@@ -359,7 +366,7 @@ def handle_message(user_text: str) -> str:
     if delete_kind:
         try:
             from coach.food import delete_last_log
-            deleted = delete_last_log(delete_kind)
+            deleted = delete_last_log(user_id, delete_kind)
             if deleted:
                 reply = reply + f"\n\n🗑️ ({deleted})"
             else:
@@ -368,7 +375,7 @@ def handle_message(user_text: str) -> str:
             log.exception("failed to delete last log")
 
     # Store coach reply
-    _save_chat_message("coach", reply)
+    _save_chat_message(user_id, "coach", reply)
 
     return reply
 
@@ -399,7 +406,7 @@ def _format_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
-def _process_directives(text: str) -> tuple[str, str | None, str | None]:
+def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None]:
     """Extract [MEMORY: ...], [CREATE_PLAN: ...] and [DELETE_LAST: ...] directives.
 
     Returns (cleaned_text, plan_request_or_None, delete_kind_or_None).
@@ -417,7 +424,7 @@ def _process_directives(text: str) -> tuple[str, str | None, str | None]:
             inner = stripped[8:-1].strip()
             if "=" in inner:
                 key, value = inner.split("=", 1)
-                save_memory(key.strip(), value.strip())
+                save_memory(user_id, key.strip(), value.strip())
                 log.info("saved memory: %s = %s", key.strip(), value.strip())
         elif stripped.startswith("[CREATE_PLAN:") and stripped.endswith("]"):
             plan_request = stripped[13:-1].strip()
@@ -436,7 +443,9 @@ if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+
     message = sys.argv[1] if len(sys.argv) > 1 else "How did I sleep last night?"
     print(f"You: {message}\n")
-    reply = handle_message(message)
+    reply = handle_message(DEFAULT_USER_ID, message)
     print(f"Coach: {reply}")

@@ -14,6 +14,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / "coach.db"
 GOOGLE_CLIENT_SECRET_FILE = DATA_DIR / "google_client_secret.json"
+GOOGLE_CLIENT_SECRET_WEB_FILE = DATA_DIR / "google_client_secret_web.json"  # Web app client for multi-user OAuth
 GOOGLE_TOKEN_FILE = DATA_DIR / "google_token.json"
 
 GOOGLE_HEALTH_BASE = "https://health.googleapis.com/v4"
@@ -28,7 +29,7 @@ GOOGLE_HEALTH_SCOPES = [
 # LINE Messaging API
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "")  # Your LINE user ID (get from webhook first message)
+# LINE_USER_ID removed in v2 — user identity is now per-user in the DB
 
 TZ = ZoneInfo(os.environ.get("TZ", "UTC"))
 

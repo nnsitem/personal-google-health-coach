@@ -36,8 +36,18 @@ def _civil_date(d: date | str) -> dict:
 
 
 class HealthClient:
-    def __init__(self):
-        self._creds = get_credentials()
+    def __init__(self, token_json: str | None = None):
+        if token_json:
+            import json as _json
+            from google.oauth2.credentials import Credentials
+            from coach.config import GOOGLE_HEALTH_SCOPES
+            token_data = _json.loads(token_json)
+            self._creds = Credentials.from_authorized_user_info(token_data, GOOGLE_HEALTH_SCOPES)
+            if self._creds.expired and self._creds.refresh_token:
+                from google.auth.transport.requests import Request
+                self._creds.refresh(Request())
+        else:
+            self._creds = get_credentials()
         self._session = requests.Session()
 
     def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> dict:

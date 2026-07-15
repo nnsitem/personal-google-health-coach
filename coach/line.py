@@ -21,7 +21,7 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 
-from coach.config import LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID
+from coach.config import LINE_CHANNEL_ACCESS_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -39,10 +39,9 @@ def _get_api() -> MessagingApi:
 
 
 def send_text(text: str, to: str | None = None) -> dict:
-    """Send a push message to the user."""
-    to = to or LINE_USER_ID
+    """Send a push message to the user. `to` (LINE userId) is required in v2."""
     if not to:
-        raise LineError("LINE_USER_ID not set in .env")
+        raise LineError("send_text requires a 'to' user ID")
 
     api = _get_api()
     messages = []
@@ -90,6 +89,7 @@ def reply_text(reply_token: str, text: str) -> dict:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
     message = sys.argv[1] if len(sys.argv) > 1 else "Hello from your health coach 🏃"
-    send_text(message)
+    send_text(message, to=DEFAULT_USER_ID)
     print(f"Sent: {message}")

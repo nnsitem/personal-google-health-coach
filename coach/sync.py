@@ -31,13 +31,13 @@ LIST_TYPES = [
 ]
 
 
-def sync_daily_rollups(client: HealthClient, start_date: str, end_date: str) -> None:
+def sync_daily_rollups(user_id: str, client: HealthClient, start_date: str, end_date: str) -> None:
     for data_type in DAILY_ROLLUP_TYPES:
         try:
             points = client.daily_rollup(data_type, start_date, end_date)
         except HealthAPIError as e:
             log.warning("dailyRollUp failed for %s: %s", data_type, e)
-            db.log_sync(data_type, ok=False, detail=str(e))
+            db.log_sync(user_id, data_type, ok=False, detail=str(e))
             continue
         for point in points:
             # DailyRollupDataPoint has civilStartTime and a value union field.
@@ -53,12 +53,12 @@ def sync_daily_rollups(client: HealthClient, start_date: str, end_date: str) -> 
             if not day:
                 log.warning("no date on %s point, skipping: %s", data_type, point)
                 continue
-            db.upsert_metric(day, None, data_type, point, source="dailyRollUp")
-        db.log_sync(data_type, ok=True, detail=f"{len(points)} points")
+            db.upsert_metric(user_id, day, None, data_type, point, source="dailyRollUp")
+        db.log_sync(user_id, data_type, ok=True, detail=f"{len(points)} points")
         log.info("synced %s: %d daily points", data_type, len(points))
 
 
-def sync_sleep(client: HealthClient, start_date: str, end_date: str) -> None:
+def sync_sleep(user_id: str, client: HealthClient, start_date: str, end_date: str) -> None:
     """Sync sleep sessions using the list endpoint with a filter."""
     # Sleep uses civil_end_time filter per API docs
     filter_str = (
@@ -69,7 +69,7 @@ def sync_sleep(client: HealthClient, start_date: str, end_date: str) -> None:
         sessions = client.list_points("sleep", filter_str)
     except HealthAPIError as e:
         log.warning("sleep list failed: %s", e)
-        db.log_sync("sleep", ok=False, detail=str(e))
+        db.log_sync(user_id, "sleep", ok=False, detail=str(e))
         return
 
     for session in sessions:
@@ -81,16 +81,17 @@ def sync_sleep(client: HealthClient, start_date: str, end_date: str) -> None:
             log.warning("sleep session missing start/end, skipping: %s", session)
             continue
         db.upsert_sleep_session(
+            user_id,
             str(start), str(end),
             stages=sleep_data.get("stages"),
             efficiency=sleep_data.get("sleepEfficiency"),
             score=sleep_data.get("overallScore"),
         )
-    db.log_sync("sleep", ok=True, detail=f"{len(sessions)} sessions")
+    db.log_sync(user_id, "sleep", ok=True, detail=f"{len(sessions)} sessions")
     log.info("synced sleep: %d sessions", len(sessions))
 
 
-def sync_list_types(client: HealthClient, start_date: str, end_date: str) -> None:
+def sync_list_types(user_id: str, client: HealthClient, start_date: str, end_date: str) -> None:
     """Sync data types that only support list (not dailyRollUp)."""
     for data_type in LIST_TYPES:
         # Use civil date filter with the data type name in snake_case for the filter field
@@ -103,7 +104,7 @@ def sync_list_types(client: HealthClient, start_date: str, end_date: str) -> Non
             points = client.list_points(data_type, filter_str)
         except HealthAPIError as e:
             log.warning("list failed for %s: %s", data_type, e)
-            db.log_sync(data_type, ok=False, detail=str(e))
+            db.log_sync(user_id, data_type, ok=False, detail=str(e))
             continue
         for point in points:
             # Try to extract date from the point's nested data
@@ -123,14 +124,18 @@ def sync_list_types(client: HealthClient, start_date: str, end_date: str) -> Non
             if not day:
                 log.warning("no date on %s point, storing with start_date: %s", data_type, point)
                 day = start_date
-            db.upsert_metric(day, None, data_type, point, source="list")
-        db.log_sync(data_type, ok=True, detail=f"{len(points)} points")
+            db.upsert_metric(user_id, day, None, data_type, point, source="list")
+        db.log_sync(user_id, data_type, ok=True, detail=f"{len(points)} points")
         log.info("synced %s (list): %d points", data_type, len(points))
 
 
-def run_sync() -> None:
+def run_sync(user_id: str) -> None:
     db.init_db()
-    client = HealthClient()
+
+    # Look up user's Google token for multi-user support; fall back to file-based auth
+    user = db.get_user(user_id)
+    token_json = (user.get("google_token_json") if user else None) or None
+    client = HealthClient(token_json=token_json)
 
     today_local = datetime.now(TZ).date()
     # Cover trailing days for dailyRollUp (civil dates)
@@ -139,13 +144,13 @@ def run_sync() -> None:
     # end_date is EXCLUSIVE, so use tomorrow to include today's data.
     end_date = (today_local + timedelta(days=1)).isoformat()
 
-    sync_daily_rollups(client, start_date, end_date)
-    sync_list_types(client, start_date, end_date)
-    sync_sleep(client, start_date, end_date)
+    sync_daily_rollups(user_id, client, start_date, end_date)
+    sync_list_types(user_id, client, start_date, end_date)
+    sync_sleep(user_id, client, start_date, end_date)
     log.info("sync complete (%s .. %s)", start_date, end_date)
 
 
-def run_backfill(days: int = 90) -> None:
+def run_backfill(user_id: str, days: int = 90) -> None:
     """Backfill historical data so weekly/monthly trends have history immediately.
 
     dailyRollUp has per-type range limits (14 days for total-calories &
@@ -153,7 +158,10 @@ def run_backfill(days: int = 90) -> None:
     list/sleep endpoints accept wider ranges, so those are done in one pass.
     """
     db.init_db()
-    client = HealthClient()
+
+    user = db.get_user(user_id)
+    token_json = (user.get("google_token_json") if user else None) or None
+    client = HealthClient(token_json=token_json)
 
     today_local = datetime.now(TZ).date()
     end = today_local + timedelta(days=1)  # exclusive, includes today
@@ -166,30 +174,33 @@ def run_backfill(days: int = 90) -> None:
     cursor = start
     while cursor < end:
         chunk_end = min(cursor + chunk, end)
-        sync_daily_rollups(client, cursor.isoformat(), chunk_end.isoformat())
+        sync_daily_rollups(user_id, client, cursor.isoformat(), chunk_end.isoformat())
         cursor = chunk_end
 
     # list + sleep in a single wide range
-    sync_list_types(client, start.isoformat(), end.isoformat())
-    sync_sleep(client, start.isoformat(), end.isoformat())
+    sync_list_types(user_id, client, start.isoformat(), end.isoformat())
+    sync_sleep(user_id, client, start.isoformat(), end.isoformat())
 
     log.info("backfill complete (%d days)", days)
 
 
-def _history_days() -> int:
+def _history_days(user_id: str) -> int:
     """Count how many distinct days of metric data we have stored."""
     with db.connect() as conn:
-        row = conn.execute("SELECT COUNT(DISTINCT day) AS c FROM metrics").fetchone()
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT day) AS c FROM metrics WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
     return row["c"] if row else 0
 
 
-def backfill_if_sparse(min_days: int = 14, backfill_days: int = 90) -> None:
+def backfill_if_sparse(user_id: str, min_days: int = 14, backfill_days: int = 90) -> None:
     """Run a one-time backfill if we have fewer than `min_days` of history."""
     try:
-        have = _history_days()
+        have = _history_days(user_id)
         if have < min_days:
             log.info("only %d days of history — running %d-day backfill", have, backfill_days)
-            run_backfill(backfill_days)
+            run_backfill(user_id, backfill_days)
     except Exception:
         log.exception("backfill_if_sparse failed")
 
@@ -197,8 +208,11 @@ def backfill_if_sparse(min_days: int = 14, backfill_days: int = 90) -> None:
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+
     if len(sys.argv) > 1 and sys.argv[1] == "backfill":
         days = int(sys.argv[2]) if len(sys.argv) > 2 else 90
-        run_backfill(days)
+        run_backfill(DEFAULT_USER_ID, days)
     else:
-        run_sync()
+        run_sync(DEFAULT_USER_ID)

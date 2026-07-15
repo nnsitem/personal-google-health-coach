@@ -14,7 +14,7 @@ from coach.line import send_text, LineError
 log = logging.getLogger(__name__)
 
 
-def run_daily_summary() -> str:
+def run_daily_summary(user_id: str) -> str:
     """Full daily flow: refresh data, generate summary, send via LINE.
 
     Returns the generated message text.
@@ -24,18 +24,18 @@ def run_daily_summary() -> str:
     # 1. Sync latest data so the snapshot is fresh
     log.info("refreshing health data before daily summary...")
     try:
-        run_sync()
+        run_sync(user_id)
     except Exception:
         log.exception("sync failed before daily summary — proceeding with stale data")
 
     # 2. Generate coaching message via Gemini
     log.info("generating daily summary with Gemini...")
-    message = generate_daily_summary()
+    message = generate_daily_summary(user_id)
     log.info("daily summary generated (%d chars)", len(message))
 
     # 3. Deliver via LINE
     try:
-        send_text(message)
+        send_text(message, to=user_id)
         log.info("daily summary sent via LINE")
 
         # Mark as delivered
@@ -59,4 +59,6 @@ def run_daily_summary() -> str:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    print(run_daily_summary())
+
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+    print(run_daily_summary(DEFAULT_USER_ID))

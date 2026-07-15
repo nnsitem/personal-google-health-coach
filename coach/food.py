@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from google import genai
 
 from coach import db
-from coach.config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
 from coach.health_api import HealthClient, HealthAPIError
 
 log = logging.getLogger(__name__)
@@ -74,14 +74,15 @@ def _infer_meal_type(now: datetime) -> str:
     return "SNACK"             # late night / early morning
 
 
-def _get_language() -> str:
+def _get_language(user_id: str) -> str:
     """Read the user's preferred language from coach_memory. Returns a display
     name suitable for prompting Gemini (e.g. 'Thai', 'English'). Defaults to English.
     """
     try:
         with db.connect() as conn:
             row = conn.execute(
-                "SELECT content FROM coach_memory WHERE lower(name) = 'language'"
+                "SELECT content FROM coach_memory WHERE user_id = ? AND lower(name) = 'language'",
+                (user_id,),
             ).fetchone()
         if row and row["content"]:
             return row["content"].strip()
@@ -98,16 +99,18 @@ def _lang_code(language: str) -> str:
     return "en"
 
 
-def analyze_food_image(image_bytes: bytes, mime_type: str = "image/jpeg",
+def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image/jpeg",
                        language: str = "English") -> dict | None:
     """Run Gemini vision on the image and return a nutrition estimate dict.
 
     Returns None if analysis fails or the image isn't food.
     """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set")
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    if not api_key:
+        raise RuntimeError("No Gemini API key configured")
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
     image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
     # The '*_en' name must be English (used for the Google Health log); the
@@ -238,7 +241,7 @@ def _build_hydration_datapoint(analysis: dict) -> dict:
     }
 
 
-def log_food_to_health(analysis: dict) -> bool:
+def log_food_to_health(user_id: str, analysis: dict) -> bool:
     """Write the analyzed meal to Google Health as a nutrition-log data point.
 
     Returns True on success, False on failure.
@@ -246,8 +249,13 @@ def log_food_to_health(analysis: dict) -> bool:
     now = datetime.now(TZ)
     data_point = _build_nutrition_datapoint(analysis, now)
 
+    user = db.get_user(user_id)
+    token_json = (user.get("google_token_json") if user else None) or None
+    if not token_json:
+        log.warning("user %s has no Google token — skipping nutrition write", user_id)
+        return False
     try:
-        client = HealthClient()
+        client = HealthClient(token_json=token_json)
         client.create_data_point("nutrition-log", data_point)
         log.info("logged nutrition to Google Health: %s",
                  analysis.get("food_name_en") or analysis.get("food_name_local"))
@@ -257,11 +265,16 @@ def log_food_to_health(analysis: dict) -> bool:
         return False
 
 
-def log_hydration_to_health(analysis: dict) -> bool:
+def log_hydration_to_health(user_id: str, analysis: dict) -> bool:
     """Write the analyzed drink to Google Health as a hydration-log data point."""
     data_point = _build_hydration_datapoint(analysis)
+    user = db.get_user(user_id)
+    token_json = (user.get("google_token_json") if user else None) or None
+    if not token_json:
+        log.warning("user %s has no Google token — skipping hydration write", user_id)
+        return False
     try:
-        client = HealthClient()
+        client = HealthClient(token_json=token_json)
         client.create_data_point("hydration-log", data_point)
         log.info("logged hydration to Google Health: %s ml", analysis.get("volume_ml"))
         return True
@@ -270,16 +283,16 @@ def log_hydration_to_health(analysis: dict) -> bool:
         return False
 
 
-def _store_food_log(analysis: dict, synced: bool) -> None:
+def _store_food_log(user_id: str, analysis: dict, synced: bool) -> None:
     """Record the food log locally (for history + weekly reports)."""
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO insights (ts, kind, content, delivered) VALUES (datetime('now'), 'food_log', ?, ?)",
-            (json.dumps({**analysis, "synced_to_health": synced}), 1),
+            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'food_log', ?, ?)",
+            (user_id, json.dumps({**analysis, "synced_to_health": synced}), 1),
         )
 
 
-def delete_last_log(kind: str = "food") -> str | None:
+def delete_last_log(user_id: str, kind: str = "food") -> str | None:
     """Delete the most recent nutrition-log or hydration-log entry from Google Health.
 
     kind: 'food' -> nutrition-log, 'drink' -> hydration-log.
@@ -298,7 +311,9 @@ def delete_last_log(kind: str = "food") -> str | None:
     )
 
     try:
-        client = HealthClient()
+        user = db.get_user(user_id)
+        token_json = (user.get("google_token_json") if user else None) or None
+        client = HealthClient(token_json=token_json)
         points = client.list_points(data_type, filter_str)
     except HealthAPIError as e:
         log.error("failed to list %s for delete: %s", data_type, e)
@@ -368,7 +383,7 @@ LABELS = {
 }
 
 
-def handle_food_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+def handle_food_photo(user_id: str, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
     """Full flow: analyze image → log to Google Health → return a LINE reply.
 
     Handles both food (nutrition-log) and drinks (hydration-log).
@@ -376,19 +391,19 @@ def handle_food_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
     """
     db.init_db()
 
-    language = _get_language()
+    language = _get_language(user_id)
     labels = LABELS.get(_lang_code(language), LABELS["en"])
 
-    analysis = analyze_food_image(image_bytes, mime_type, language=language)
+    analysis = analyze_food_image(user_id, image_bytes, mime_type, language=language)
     if not analysis or analysis.get("type") not in ("food", "drink"):
         return labels["unclear"]
 
     if analysis["type"] == "drink":
-        return _handle_drink(analysis, labels)
-    return _handle_food(analysis, labels)
+        return _handle_drink(user_id, analysis, labels)
+    return _handle_food(user_id, analysis, labels)
 
 
-def _handle_food(analysis: dict, labels: dict) -> str:
+def _handle_food(user_id: str, analysis: dict, labels: dict) -> str:
     cal = round(float(analysis.get("calories_kcal") or 0))
 
     # Don't log if there's no real portion (e.g. empty plate / not food)
@@ -396,8 +411,8 @@ def _handle_food(analysis: dict, labels: dict) -> str:
         log.info("food calories is 0 — skipping nutrition log")
         return labels["empty_food"]
 
-    synced = log_food_to_health(analysis)
-    _store_food_log(analysis, synced)
+    synced = log_food_to_health(user_id, analysis)
+    _store_food_log(user_id, analysis, synced)
 
     # Show the localized name in the reply, English as fallback
     name = analysis.get("food_name_local") or analysis.get("food_name_en") or "meal"
@@ -425,7 +440,7 @@ def _handle_food(analysis: dict, labels: dict) -> str:
     return "\n".join(lines)
 
 
-def _handle_drink(analysis: dict, labels: dict) -> str:
+def _handle_drink(user_id: str, analysis: dict, labels: dict) -> str:
     ml = round(float(analysis.get("volume_ml") or 0))
 
     # Don't log an empty container
@@ -433,7 +448,7 @@ def _handle_drink(analysis: dict, labels: dict) -> str:
         log.info("drink volume is 0 — skipping hydration log")
         return labels["empty_drink"]
 
-    synced_hydration = log_hydration_to_health(analysis)
+    synced_hydration = log_hydration_to_health(user_id, analysis)
 
     # If the drink has significant calories/protein (e.g. protein shake, juice,
     # smoothie), also log it as a nutrition entry.
@@ -448,9 +463,9 @@ def _handle_drink(analysis: dict, labels: dict) -> str:
             "total_carbohydrate_g": analysis.get("total_carbohydrate_g", 0),
             "total_fat_g": analysis.get("total_fat_g", 0),
         }
-        synced_nutrition = log_food_to_health(nutrition_analysis)
+        synced_nutrition = log_food_to_health(user_id, nutrition_analysis)
 
-    _store_food_log(analysis, synced_hydration)
+    _store_food_log(user_id, analysis, synced_hydration)
 
     name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
     protein = round(float(analysis.get("protein_g") or 0))
@@ -490,9 +505,12 @@ def _handle_drink(analysis: dict, labels: dict) -> str:
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+
     if len(sys.argv) < 2:
         print("Usage: python -m coach.food <image_path>")
         sys.exit(1)
     with open(sys.argv[1], "rb") as f:
         img = f.read()
-    print(handle_food_photo(img))
+    print(handle_food_photo(DEFAULT_USER_ID, img))

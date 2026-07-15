@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from google import genai
 
 from coach import db
-from coach.config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
 from coach.line import send_text, LineError
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ Guidelines:
 """
 
 
-def build_weekly_snapshot() -> dict:
+def build_weekly_snapshot(user_id: str) -> dict:
     """Build a comprehensive 7-day snapshot for the weekly report."""
     today = datetime.now(TZ).date()
     week_start = today - timedelta(days=7)
@@ -58,8 +58,8 @@ def build_weekly_snapshot() -> dict:
     # Daily metrics
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT day, data_type, value_json FROM metrics WHERE day >= ? AND day < ? ORDER BY day",
-            (week_start.isoformat(), today.isoformat()),
+            "SELECT day, data_type, value_json FROM metrics WHERE user_id = ? AND day >= ? AND day < ? ORDER BY day",
+            (user_id, week_start.isoformat(), today.isoformat()),
         ).fetchall()
 
     for row in rows:
@@ -86,8 +86,8 @@ def build_weekly_snapshot() -> dict:
     # Sleep sessions
     with db.connect() as conn:
         sleep_rows = conn.execute(
-            "SELECT start, end, stages_json FROM sleep_sessions WHERE start >= ? ORDER BY start",
-            (week_start.isoformat(),),
+            "SELECT start, end, stages_json FROM sleep_sessions WHERE user_id = ? AND start >= ? ORDER BY start",
+            (user_id, week_start.isoformat()),
         ).fetchall()
 
     for row in sleep_rows:
@@ -118,30 +118,36 @@ def build_weekly_snapshot() -> dict:
 
     # Goals
     with db.connect() as conn:
-        goal_rows = conn.execute("SELECT key, value_json FROM goals").fetchall()
+        goal_rows = conn.execute(
+            "SELECT key, value_json FROM goals WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
     snapshot["goals"] = {row["key"]: json.loads(row["value_json"]) for row in goal_rows}
 
     # Coach memory
     with db.connect() as conn:
         memory_rows = conn.execute(
-            "SELECT name, content FROM coach_memory ORDER BY updated_at DESC LIMIT 10"
+            "SELECT name, content FROM coach_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10",
+            (user_id,),
         ).fetchall()
     snapshot["coach_memory"] = {row["name"]: row["content"] for row in memory_rows}
 
     return snapshot
 
 
-def generate_weekly_report(snapshot: dict | None = None) -> str:
+def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
     """Generate the weekly report using Gemini."""
     import time
 
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set in .env")
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    if not api_key:
+        raise RuntimeError("No Gemini API key configured")
 
     if snapshot is None:
-        snapshot = build_weekly_snapshot()
+        snapshot = build_weekly_snapshot(user_id)
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
 
     user_message = (
         "Here is my complete health data for the past week:\n\n"
@@ -168,8 +174,8 @@ def generate_weekly_report(snapshot: dict | None = None) -> str:
                 if text and len(text) > 100:
                     with db.connect() as conn:
                         conn.execute(
-                            "INSERT INTO insights (ts, kind, content, delivered) VALUES (datetime('now'), 'weekly_report', ?, 0)",
-                            (text,),
+                            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'weekly_report', ?, 0)",
+                            (user_id, text),
                         )
                     return text
             except Exception as e:
@@ -184,16 +190,16 @@ def generate_weekly_report(snapshot: dict | None = None) -> str:
     raise RuntimeError("Failed to generate weekly report — all models unavailable")
 
 
-def run_weekly_report() -> str:
+def run_weekly_report(user_id: str) -> str:
     """Full weekly flow: generate report and send via LINE."""
     db.init_db()
 
     log.info("generating weekly report...")
-    message = generate_weekly_report()
+    message = generate_weekly_report(user_id)
     log.info("weekly report generated (%d chars)", len(message))
 
     try:
-        send_text(message)
+        send_text(message, to=user_id)
         log.info("weekly report sent via LINE")
         with db.connect() as conn:
             conn.execute(
@@ -201,10 +207,11 @@ def run_weekly_report() -> str:
                 UPDATE insights SET delivered = 1
                 WHERE rowid = (
                     SELECT rowid FROM insights
-                    WHERE kind = 'weekly_report' AND delivered = 0
+                    WHERE user_id = ? AND kind = 'weekly_report' AND delivered = 0
                     ORDER BY ts DESC LIMIT 1
                 )
                 """,
+                (user_id,),
             )
     except LineError as e:
         log.error("LINE delivery failed: %s", e)
@@ -214,4 +221,6 @@ def run_weekly_report() -> str:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    print(run_weekly_report())
+
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+    print(run_weekly_report(DEFAULT_USER_ID))

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from google import genai
 
 from coach import db
-from coach.config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
 
 log = logging.getLogger(__name__)
 
@@ -42,17 +42,19 @@ Guidelines:
 """
 
 
-def create_workout_plan(user_request: str, context: dict) -> dict:
+def create_workout_plan(user_id: str, user_request: str, context: dict) -> dict:
     """Generate a workout plan based on user request and health context.
 
     Returns the plan dict and saves it to the goals table.
     """
     import time
 
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set")
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    if not api_key:
+        raise RuntimeError("No Gemini API key configured")
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
 
     prompt = (
         f"User request: {user_request}\n\n"
@@ -79,7 +81,7 @@ def create_workout_plan(user_request: str, context: dict) -> dict:
                 # Extract JSON from response
                 plan = _extract_json(text)
                 if plan:
-                    save_plan(plan)
+                    save_plan(user_id, plan)
                     return plan
             except Exception as e:
                 if "503" in str(e) or "UNAVAILABLE" in str(e):
@@ -127,7 +129,7 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def save_plan(plan: dict) -> None:
+def save_plan(user_id: str, plan: dict) -> None:
     """Save a workout plan to the goals table."""
     plan["created"] = datetime.now(TZ).isoformat()
     plan["week"] = 1
@@ -136,29 +138,30 @@ def save_plan(plan: dict) -> None:
     with db.connect() as conn:
         conn.execute(
             """
-            INSERT INTO goals (key, value_json, updated_at)
-            VALUES ('workout_plan', ?, datetime('now'))
-            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')
+            INSERT INTO goals (user_id, key, value_json, updated_at)
+            VALUES (?, 'workout_plan', ?, datetime('now'))
+            ON CONFLICT(user_id, key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')
             """,
-            (json.dumps(plan),),
+            (user_id, json.dumps(plan)),
         )
     log.info("saved workout plan: %s (%d weeks)", plan.get("name", "unnamed"), plan.get("duration_weeks", 0))
 
 
-def get_current_plan() -> dict | None:
+def get_current_plan(user_id: str) -> dict | None:
     """Load the current workout plan."""
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT value_json FROM goals WHERE key = 'workout_plan'"
+            "SELECT value_json FROM goals WHERE user_id = ? AND key = 'workout_plan'",
+            (user_id,),
         ).fetchone()
     if row:
         return json.loads(row["value_json"])
     return None
 
 
-def get_today_workout() -> str | None:
+def get_today_workout(user_id: str) -> str | None:
     """Get today's scheduled workout from the active plan."""
-    plan = get_current_plan()
+    plan = get_current_plan(user_id)
     if not plan:
         return None
 
@@ -180,7 +183,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     db.init_db()
 
-    plan = get_current_plan()
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+
+    plan = get_current_plan(DEFAULT_USER_ID)
     if plan:
         print(f"Current plan: {plan.get('name')}")
         print(f"Week: {plan.get('week')}")
@@ -190,6 +195,6 @@ if __name__ == "__main__":
     else:
         print("No active plan.")
 
-    today = get_today_workout()
+    today = get_today_workout(DEFAULT_USER_ID)
     if today:
         print(f"\nToday's workout: {today}")

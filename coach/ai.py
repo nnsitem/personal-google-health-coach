@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from google import genai
 
 from coach import db
-from coach.config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ against your monthly average". This shows you understand the user's patterns.
 """
 
 
-def build_daily_snapshot() -> dict:
+def build_daily_snapshot(user_id: str) -> dict:
     """Query SQLite for the last 7 days of health data and return a compact snapshot."""
     today = datetime.now(TZ).date()
     days_back = 7
@@ -64,10 +64,10 @@ def build_daily_snapshot() -> dict:
             """
             SELECT day, data_type, value_json
             FROM metrics
-            WHERE day >= ?
+            WHERE user_id = ? AND day >= ?
             ORDER BY day DESC
             """,
-            ((today - timedelta(days=days_back)).isoformat(),),
+            (user_id, (today - timedelta(days=days_back)).isoformat()),
         ).fetchall()
 
     for row in rows:
@@ -89,10 +89,10 @@ def build_daily_snapshot() -> dict:
             """
             SELECT start, end, stages_json, efficiency, score
             FROM sleep_sessions
-            WHERE start >= ?
+            WHERE user_id = ? AND start >= ?
             ORDER BY start DESC
             """,
-            ((today - timedelta(days=days_back)).isoformat(),),
+            (user_id, (today - timedelta(days=days_back)).isoformat()),
         ).fetchall()
 
     for row in sleep_rows:
@@ -113,7 +113,8 @@ def build_daily_snapshot() -> dict:
     # Load coach memory for personalization
     with db.connect() as conn:
         memory_rows = conn.execute(
-            "SELECT name, content FROM coach_memory ORDER BY updated_at DESC LIMIT 10"
+            "SELECT name, content FROM coach_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10",
+            (user_id,),
         ).fetchall()
 
     if memory_rows:
@@ -122,7 +123,8 @@ def build_daily_snapshot() -> dict:
     # Load active goals
     with db.connect() as conn:
         goal_rows = conn.execute(
-            "SELECT key, value_json FROM goals"
+            "SELECT key, value_json FROM goals WHERE user_id = ?",
+            (user_id,),
         ).fetchall()
 
     if goal_rows:
@@ -131,7 +133,7 @@ def build_daily_snapshot() -> dict:
     # Include today's scheduled workout from the active plan, if any
     try:
         from coach.plans import get_today_workout
-        today_workout = get_today_workout()
+        today_workout = get_today_workout(user_id)
         if today_workout:
             snapshot["todays_workout"] = today_workout
     except Exception:
@@ -141,7 +143,7 @@ def build_daily_snapshot() -> dict:
     # brief can reference patterns, not just yesterday's numbers.
     try:
         from coach.stats import build_trends
-        snapshot["trends"] = build_trends()
+        snapshot["trends"] = build_trends(user_id)
     except Exception:
         pass
 
@@ -209,19 +211,21 @@ def _summarize_sleep_stages(stages: list[dict]) -> dict:
     }
 
 
-def generate_daily_summary(snapshot: dict | None = None) -> str:
+def generate_daily_summary(user_id: str, snapshot: dict | None = None) -> str:
     """Generate a daily coaching message using Gemini.
 
-    Returns the message text ready for WhatsApp delivery.
+    Returns the message text ready for LINE delivery.
     Tries the primary model, then fallbacks if unavailable.
     """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set in .env")
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    if not api_key:
+        raise RuntimeError("No Gemini API key configured")
 
     if snapshot is None:
-        snapshot = build_daily_snapshot()
+        snapshot = build_daily_snapshot(user_id)
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
 
     user_message = (
         "Here is my health data snapshot for today's briefing:\n\n"
@@ -253,8 +257,8 @@ def generate_daily_summary(snapshot: dict | None = None) -> str:
                     # Store the generated insight
                     with db.connect() as conn:
                         conn.execute(
-                            "INSERT INTO insights (ts, kind, content, delivered) VALUES (datetime('now'), 'daily_summary', ?, 0)",
-                            (message_text,),
+                            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'daily_summary', ?, 0)",
+                            (user_id, message_text),
                         )
                     return message_text
                 log.warning("model %s returned short response (%d chars), retrying...", model, len(message_text or ""))
@@ -279,14 +283,16 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     db.init_db()
 
-    snapshot = build_daily_snapshot()
+    DEFAULT_USER_ID = "U1068a1b9c15b44e7ff1439bdefdeb5dc"
+
+    snapshot = build_daily_snapshot(DEFAULT_USER_ID)
     print("=== SNAPSHOT ===")
     print(json.dumps(snapshot, indent=2))
     print()
 
-    if GEMINI_API_KEY:
+    if DEFAULT_GEMINI_KEY:
         print("=== DAILY SUMMARY ===")
-        summary = generate_daily_summary(snapshot)
+        summary = generate_daily_summary(DEFAULT_USER_ID, snapshot)
         print(summary)
     else:
         print("(GEMINI_API_KEY not set — skipping generation)")
