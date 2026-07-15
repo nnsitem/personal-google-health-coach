@@ -57,13 +57,14 @@ and primary key / indexes:
 
 ---
 
-## 3. Onboarding flow (LINE Rich Menu)
+## 3. Onboarding flow (text commands)
 
-### Rich Menu buttons:
-1. **🔗 Login Google Health** — connect their Fitbit/Pixel Watch
-2. **🔑 Set Gemini Key** — provide their own AI key
-3. **💬 Chat** — talk to the coach (default action)
-4. **📊 My Summary** — trigger a daily summary on demand
+Onboarding is driven by plain text commands in chat (a Rich Menu was considered
+and dropped — see §8):
+
+1. **`login`** — connect their Fitbit/Pixel Watch (Google Health OAuth)
+2. **`set key`** — provide their own Gemini AI key
+3. Anything else — chat with the coach (default)
 
 ### 3.1 Google Health OAuth flow
 
@@ -154,31 +155,19 @@ TZ=Asia/Bangkok                    # default timezone for new users
 2. Add `user_id` column to all existing tables (default to current user's ID)
 3. Update all queries to filter by `user_id`
 4. Remove `LINE_USER_ID` check from webhook (any user accepted)
-5. Add onboarding flow + rich menu endpoints
+5. Add onboarding flow (text commands)
 6. Add per-user sync loop
 7. Add encryption for stored credentials
 
 ---
 
-## 8. LINE Rich Menu setup
+## 8. LINE Rich Menu — dropped
 
-Create via LINE Messaging API (or the LINE Official Account Manager):
-
-```
-┌─────────────────────────────────────────┐
-│  🔗 Login         │  🔑 Set Key         │
-│  Google Health    │  Gemini AI          │
-├─────────────────────────────────────────┤
-│  💬 Chat with     │  📊 My Summary      │
-│  Coach            │  (on demand)        │
-└─────────────────────────────────────────┘
-```
-
-Each button sends a postback action text that the webhook recognizes:
-- `action=login_google`
-- `action=set_gemini_key`
-- `action=chat` (default, just opens keyboard)
-- `action=my_summary`
+A Rich Menu (buttons for login / set key / chat / summary) was originally
+planned and later removed from scope: text-command onboarding (§3) covers the
+same flows with no extra setup, and the webhook still recognizes the
+`action=login_google` / `action=set_gemini_key` postback strings should a menu
+ever be added back. The setup script was removed in commit 86e5e39.
 
 ---
 
@@ -215,9 +204,8 @@ Each button sends a postback action text that the webhook recognizes:
 5. Gemini key setup via chat
 6. Refactor all modules to accept `user_id` parameter
 7. Per-user sync loop
-8. Rich menu creation
-9. Remove single-user `.env` config (LINE_USER_ID, GEMINI_API_KEY)
-10. Testing with 2+ accounts
+8. Remove single-user `.env` config (LINE_USER_ID, GEMINI_API_KEY)
+9. Testing with 2+ accounts
 
 ---
 
@@ -305,8 +293,6 @@ effort. Tiered by necessity for a **small, trusted group on your own Mac mini**.
   tokens + API keys. On a personal Mac mini for a trusted group the risk is
   lower, but if `data/` is ever backed up to cloud or the box is shared, this
   matters. Recommend implementing, but it can follow the initial refactor.
-- **LINE Rich Menu** — good UX, but onboarding can start with text commands
-  ("login", "set key"). Add the menu once the flow works.
 - **Token-expiry / error notifications** — more important with multiple users
   since you won't be watching logs for everyone.
 
@@ -338,7 +324,9 @@ it means v2 isn't fully self-serve, which is acceptable for the stated small-gro
 4. Gemini key setup via chat
 5. Per-user sync loop
 6. Credential encryption
-7. Rich menu + notifications (polish)
+7. Token-expiry / error notifications (polish)
+
+(LINE Rich Menu: cut from scope — text commands cover onboarding, see §8.)
 
 Everything in §10–13's "optional/defer" list is explicitly **out of scope for the
 initial v2 release**.
