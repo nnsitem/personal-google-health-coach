@@ -46,12 +46,13 @@ against your monthly average". This shows you understand the user's patterns.
 
 def build_daily_snapshot(user_id: str) -> dict:
     """Query SQLite for the last 7 days of health data and return a compact snapshot."""
-    today = datetime.now(TZ).date()
+    tz = db.user_tz(db.get_user(user_id))
+    today = datetime.now(tz).date()
     days_back = 7
 
     snapshot = {
         "today": today.isoformat(),
-        "timezone": str(TZ),
+        "timezone": str(tz),
         "metrics": {},
         "sleep": [],
     }

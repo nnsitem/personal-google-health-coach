@@ -134,7 +134,7 @@ def run_sync(user_id: str) -> None:
 
     client = client_for_user(user_id)
 
-    today_local = datetime.now(TZ).date()
+    today_local = datetime.now(db.user_tz(db.get_user(user_id))).date()
     # Cover trailing days for dailyRollUp (civil dates)
     lookback_days = SYNC_LOOKBACK_HOURS // 24 + 1
     start_date = (today_local - timedelta(days=lookback_days)).isoformat()
@@ -158,7 +158,7 @@ def run_backfill(user_id: str, days: int = 90) -> None:
 
     client = client_for_user(user_id)
 
-    today_local = datetime.now(TZ).date()
+    today_local = datetime.now(db.user_tz(db.get_user(user_id))).date()
     end = today_local + timedelta(days=1)  # exclusive, includes today
     start = today_local - timedelta(days=days)
 

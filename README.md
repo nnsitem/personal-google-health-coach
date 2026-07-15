@@ -65,14 +65,14 @@ docker compose --profile webhook up -d --build
 Register the webhook URL `https://<your-host>/webhook` in the LINE Developers console
 (Messaging API tab → Webhook URL → Verify → enable "Use webhook").
 
-## Schedule (in-process, timezone from `TZ`)
+## Schedule (in-process; briefs/reports follow each user's `users.timezone`)
 
 | Job | When |
 |-----|------|
 | Health sync | hourly at :05 |
-| Nudge check | hourly at :35 |
-| Daily brief | 7:30am |
-| Weekly report | Sunday 9:00am |
+| Nudge check | hourly at :35 (quiet hours 22:00–07:00 in the user's local time) |
+| Daily brief | 7:30am in the user's local time |
+| Weekly report | Sunday 9:00am in the user's local time |
 
 ## Smoke tests
 

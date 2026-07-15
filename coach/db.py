@@ -415,6 +415,36 @@ def update_user(line_user_id: str, **fields) -> None:
         conn.execute(f"UPDATE users SET {sets} WHERE line_user_id = ?", values)
 
 
+def user_tz(user: dict | None):
+    """The user's ZoneInfo, falling back to the server TZ on missing/bad values."""
+    from zoneinfo import ZoneInfo
+    from coach.config import TZ
+    if user and user.get("timezone"):
+        try:
+            return ZoneInfo(user["timezone"])
+        except Exception:
+            log.warning("invalid timezone %r for user %s — using server TZ",
+                        user["timezone"], user.get("line_user_id"))
+    return TZ
+
+
+def insight_sent_today(user_id: str, kind: str, tz) -> bool:
+    """Whether an insight of this kind exists since the user's local midnight.
+
+    insights.ts is stored as SQLite datetime('now') (UTC), so the local
+    midnight is converted to a UTC string for comparison.
+    """
+    from datetime import datetime, timezone as _timezone
+    local_midnight = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = local_midnight.astimezone(_timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM insights WHERE user_id = ? AND kind = ? AND ts >= ? LIMIT 1",
+            (user_id, kind, cutoff),
+        ).fetchone()
+    return row is not None
+
+
 def list_active_users() -> list[dict]:
     """List all active users who have a Google token.
 

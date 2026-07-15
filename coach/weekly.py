@@ -41,13 +41,14 @@ Guidelines:
 
 def build_weekly_snapshot(user_id: str) -> dict:
     """Build a comprehensive 7-day snapshot for the weekly report."""
-    today = datetime.now(TZ).date()
+    tz = db.user_tz(db.get_user(user_id))
+    today = datetime.now(tz).date()
     week_start = today - timedelta(days=7)
 
     snapshot = {
         "report_date": today.isoformat(),
         "week_range": f"{week_start.isoformat()} to {(today - timedelta(days=1)).isoformat()}",
-        "timezone": str(TZ),
+        "timezone": str(tz),
         "daily_metrics": {},
         "sleep_sessions": [],
         "goals": {},
@@ -103,8 +104,8 @@ def build_weekly_snapshot(user_id: str) -> dict:
                 continue
 
         total_min = sum(totals.values())
-        start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(TZ)
-        end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(TZ)
+        start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(tz)
+        end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(tz)
 
         snapshot["sleep_sessions"].append({
             "date": start_local.strftime("%Y-%m-%d"),

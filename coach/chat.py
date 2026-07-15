@@ -395,8 +395,13 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             inner = stripped[8:-1].strip()
             if "=" in inner:
                 key, value = inner.split("=", 1)
-                save_memory(user_id, key.strip(), value.strip())
-                log.info("saved memory: %s = %s", key.strip(), value.strip())
+                key, value = key.strip(), value.strip()
+                save_memory(user_id, key, value)
+                log.info("saved memory: %s = %s", key, value)
+                # Mirror the language preference onto the users column so
+                # non-chat modules (food replies, etc.) see it too.
+                if key.lower() == "language" and value:
+                    db.update_user(user_id, language=value)
         elif stripped.startswith("[CREATE_PLAN:") and stripped.endswith("]"):
             plan_request = stripped[13:-1].strip()
             log.info("plan creation requested: %s", plan_request)

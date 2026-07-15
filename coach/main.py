@@ -26,6 +26,7 @@ from coach.config import LINE_CHANNEL_SECRET, TZ
 from coach.config import DAILY_SUMMARY_HOUR, DAILY_SUMMARY_MINUTE
 from coach.chat import handle_message
 from coach.line import send_text as push_text
+from coach.line import reply_text, LineError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -47,12 +48,22 @@ def _safe_sync_all() -> None:
 
 
 def _safe_daily_summary_all() -> None:
-    """Daily summary for all users with both Google token + Gemini key."""
+    """Hourly dispatcher: send the daily brief to each configured user whose
+    LOCAL clock is at DAILY_SUMMARY_HOUR, at most once per local day.
+
+    Runs every hour (at DAILY_SUMMARY_MINUTE) instead of once at a fixed
+    server-TZ time, so users.timezone is honored per user.
+    """
     from coach.daily import run_daily_summary
     for user in db.list_active_users():
         uid = user["line_user_id"]
         if not user.get("gemini_api_key"):
             continue
+        tz = db.user_tz(user)
+        if datetime.now(tz).hour != DAILY_SUMMARY_HOUR:
+            continue
+        if db.insight_sent_today(uid, "daily_summary", tz):
+            continue  # already generated today (e.g. misfire catch-up ran late)
         try:
             run_daily_summary(uid)
         except Exception:
@@ -73,11 +84,18 @@ def _safe_nudge_check_all() -> None:
 
 
 def _safe_weekly_report_all() -> None:
-    """Weekly report for all configured users."""
+    """Hourly dispatcher: send the weekly report to each configured user whose
+    LOCAL time is Sunday 9:00–9:59, at most once per local day."""
     from coach.weekly import run_weekly_report
     for user in db.list_active_users():
         uid = user["line_user_id"]
         if not user.get("gemini_api_key"):
+            continue
+        tz = db.user_tz(user)
+        now_local = datetime.now(tz)
+        if now_local.weekday() != 6 or now_local.hour != 9:
+            continue
+        if db.insight_sent_today(uid, "weekly_report", tz):
             continue
         try:
             run_weekly_report(uid)
@@ -101,23 +119,32 @@ def _safe_backfill_all() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    scheduler.add_job(_safe_backfill_all, "date", id="startup_backfill")
-    scheduler.add_job(_safe_sync_all, "cron", minute=5, id="hourly_sync")
+    # misfire_grace_time lets a job that missed its slot (container down,
+    # previous run overran) still fire once it can; coalesce collapses a
+    # backlog of missed runs into one. The daily/weekly senders are hourly
+    # DISPATCHERS that check each user's local time, so users.timezone is
+    # honored and a caught-up misfire can't double-send (insights dedup).
+    scheduler.add_job(_safe_backfill_all, "date", id="startup_backfill",
+                      misfire_grace_time=3600)
+    scheduler.add_job(_safe_sync_all, "cron", minute=5, id="hourly_sync",
+                      misfire_grace_time=1800, coalesce=True)
     scheduler.add_job(
         _safe_daily_summary_all, "cron",
-        hour=DAILY_SUMMARY_HOUR, minute=DAILY_SUMMARY_MINUTE,
-        id="daily_summary",
+        minute=DAILY_SUMMARY_MINUTE,
+        id="daily_summary", misfire_grace_time=3000, coalesce=True,
     )
-    scheduler.add_job(_safe_nudge_check_all, "cron", minute=35, id="hourly_nudge")
+    scheduler.add_job(_safe_nudge_check_all, "cron", minute=35, id="hourly_nudge",
+                      misfire_grace_time=1200, coalesce=True)
     scheduler.add_job(
         _safe_weekly_report_all, "cron",
-        day_of_week="sun", hour=9, minute=0,
-        id="weekly_report",
+        minute=0,
+        id="weekly_report", misfire_grace_time=3000, coalesce=True,
     )
     scheduler.start()
     log.info(
-        "scheduler started (sync at :05, nudges at :35, daily at %02d:%02d, weekly Sun 9:00)",
-        DAILY_SUMMARY_HOUR, DAILY_SUMMARY_MINUTE,
+        "scheduler started (sync at :05, nudges at :35, daily dispatch at :%02d "
+        "for local %02d:00, weekly dispatch hourly for local Sun 09:00)",
+        DAILY_SUMMARY_MINUTE, DAILY_SUMMARY_HOUR,
     )
     yield
     scheduler.shutdown(wait=False)
@@ -170,9 +197,27 @@ def _detect_image_mime(data: bytes) -> str:
     return "image/jpeg"
 
 
-def _send_welcome(user_id: str) -> None:
+def _send(user_id: str, text: str, reply_token: str | None = None) -> None:
+    """Send via the event's free reply token when possible, else push.
+
+    Push messages count against the per-BOT monthly quota (500 on the free
+    plan, shared across all users); replies to webhook events are free and
+    unlimited. Reply tokens are single-use and short-lived, so slow paths
+    (long Gemini retries) may miss the window — the push fallback covers that.
+    """
+    if reply_token:
+        try:
+            reply_text(reply_token, text)
+            return
+        except LineError as e:
+            log.info("reply token unusable (%s) — falling back to push", e)
+    push_text(text, to=user_id)
+
+
+def _send_welcome(user_id: str, reply_token: str | None = None) -> None:
     """Send a welcome message to brand-new users explaining setup."""
-    push_text(
+    _send(
+        user_id,
         "👋 Welcome to your AI Health Coach!\n\n"
         "I help you track your health, analyze food photos, and give personalized coaching — all via this chat.\n\n"
         "To get started, you need two things:\n\n"
@@ -182,12 +227,12 @@ def _send_welcome(user_id: str) -> None:
         "   → Send: set key\n"
         "   (Get a free key at aistudio.google.com/apikey)\n\n"
         "Once both are set, just chat with me or send a food photo! 🍽️💪",
-        to=user_id,
+        reply_token,
     )
     log.info("sent welcome to new user %s", user_id)
 
 
-def _process_text_message(user_id: str, text: str) -> None:
+def _process_text_message(user_id: str, text: str, reply_token: str | None = None) -> None:
     """Handle a text message in the background."""
     log.info("LINE message from %s: %s", user_id, text)
 
@@ -202,25 +247,27 @@ def _process_text_message(user_id: str, text: str) -> None:
             host = os.environ.get("PUBLIC_HOST", "coach.signagegold.co")
             state = _sign_state(user_id)
             login_url = f"https://{host}/auth/google?state={state}"
-            push_text(
+            _send(
+                user_id,
                 f"🔗 Open this link to connect your Google Health account:\n\n{login_url}\n\n"
                 "Sign in with the Google account linked to your Fitbit/Pixel Watch.",
-                to=user_id,
+                reply_token,
             )
             log.info("sent login URL to %s", user_id)
         except Exception:
             log.exception("failed to generate login URL")
-            push_text("Sorry, I couldn't generate a login link. Please try again.", to=user_id)
+            _send(user_id, "Sorry, I couldn't generate a login link. Please try again.", reply_token)
         return
 
     # Set Gemini key command: enter "awaiting key" mode
     if lower in ("set key", "set gemini key", "ตั้งค่า key", "เปลี่ยน key", "action=set_gemini_key"):
         db.update_user(user_id, onboarding_state="awaiting_gemini_key")
-        push_text(
+        _send(
+            user_id,
             "🔑 Please paste your Gemini API key.\n\n"
             "Get one free from: https://aistudio.google.com/apikey\n\n"
             "Just send the key as your next message (starts with 'AI...' or 'AQ...').",
-            to=user_id,
+            reply_token,
         )
         log.info("user %s entering Gemini key setup mode", user_id)
         return
@@ -228,64 +275,67 @@ def _process_text_message(user_id: str, text: str) -> None:
     # Check if user is in "awaiting key" mode — validate and store the key
     user = db.get_user(user_id)
     if user and user.get("onboarding_state") == "awaiting_gemini_key":
-        _handle_gemini_key_input(user_id, text.strip())
+        _handle_gemini_key_input(user_id, text.strip(), reply_token)
         return
 
     # Require full setup before using the coach
-    if not _ensure_configured(user_id, user):
+    if not _ensure_configured(user_id, user, reply_token):
         return
 
     # Pass to the chat agent
     try:
         reply = handle_message(user_id, text)
-        push_text(reply, to=user_id)
-        log.info("replied via LINE push: %s", reply[:80])
+        _send(user_id, reply, reply_token)
+        log.info("replied via LINE: %s", reply[:80])
     except Exception:
         log.exception("failed to handle LINE message")
 
 
-def _ensure_configured(user_id: str, user: dict | None) -> bool:
+def _ensure_configured(user_id: str, user: dict | None, reply_token: str | None = None) -> bool:
     """Check the user has both a Gemini key and Google token. If not, send a
     reminder and return False. This gates every path that would otherwise hit
     the user's Gemini key or Google token (preventing fallback to the owner's).
     """
     if not user or not user.get("gemini_api_key"):
-        push_text(
+        _send(
+            user_id,
             "🔑 You haven't set up your AI key yet.\n"
             "Send: set key\n\n"
             "Get a free one at: https://aistudio.google.com/apikey",
-            to=user_id,
+            reply_token,
         )
         return False
 
     if not user.get("google_token_json"):
-        push_text(
+        _send(
+            user_id,
             "🔗 You haven't connected Google Health yet.\n"
             "Send: login\n\n"
             "This connects your Fitbit/Pixel Watch data.",
-            to=user_id,
+            reply_token,
         )
         return False
 
     return True
 
 
-def _handle_gemini_key_input(user_id: str, key: str) -> None:
+def _handle_gemini_key_input(user_id: str, key: str, reply_token: str | None = None) -> None:
     """Validate a Gemini API key and store it if valid."""
     # Cancel must be checked BEFORE the format check — 'cancel' is shorter than
     # 20 chars, so the other order traps the user in key-setup mode forever.
     if key.lower() == "cancel":
         db.update_user(user_id, onboarding_state="")
-        push_text("Key setup cancelled.", to=user_id)
+        _send(user_id, "Key setup cancelled.", reply_token)
         return
 
     # Basic format check
     if len(key) < 20 or " " in key or "\n" in key:
-        push_text(
+        _send(
+            user_id,
             "❌ That doesn't look like a valid API key. "
             "Please paste the full key (no spaces or line breaks).\n\n"
             "Or send 'cancel' to exit setup.",
-            to=user_id,
+            reply_token,
         )
         return
 
@@ -299,32 +349,34 @@ def _handle_gemini_key_input(user_id: str, key: str) -> None:
             raise RuntimeError("No models returned")
     except Exception as e:
         log.warning("Gemini key validation failed for user %s: %s", user_id, e)
-        push_text(
+        _send(
+            user_id,
             "❌ That key didn't work. Please check and try again.\n\n"
             "Error: " + str(e)[:100] + "\n\n"
             "Or send 'cancel' to exit setup.",
-            to=user_id,
+            reply_token,
         )
         return
 
     # Key is valid — store it and exit onboarding mode
     db.update_user(user_id, gemini_api_key=key, onboarding_state="")
-    push_text(
+    _send(
+        user_id,
         "✅ Gemini API key saved and verified!\n\n"
         "Your AI health coach is now fully configured. "
         "Send me a message or a food photo to get started 💪",
-        to=user_id,
+        reply_token,
     )
     log.info("stored valid Gemini key for user %s", user_id)
 
 
-def _process_image_message(user_id: str, message_id: str) -> None:
+def _process_image_message(user_id: str, message_id: str, reply_token: str | None = None) -> None:
     """Handle an image message in the background."""
     from coach.line import get_image_content
     from coach.food import handle_food_photo
 
     # Require full setup before touching the user's Gemini key / Google token
-    if not _ensure_configured(user_id, db.get_user(user_id)):
+    if not _ensure_configured(user_id, db.get_user(user_id), reply_token):
         return
 
     log.info("LINE image from %s (id=%s) — analyzing", user_id, message_id)
@@ -332,12 +384,12 @@ def _process_image_message(user_id: str, message_id: str) -> None:
         image_bytes = get_image_content(message_id)
         mime = _detect_image_mime(image_bytes)
         reply = handle_food_photo(user_id, image_bytes, mime_type=mime)
-        push_text(reply, to=user_id)
+        _send(user_id, reply, reply_token)
         log.info("photo processed: %s", reply[:80])
     except Exception:
         log.exception("failed to handle photo")
         try:
-            push_text("Sorry, I couldn't analyze that photo. Please try again. 🙏", to=user_id)
+            _send(user_id, "Sorry, I couldn't analyze that photo. Please try again. 🙏", reply_token)
         except Exception:
             pass
 
@@ -365,23 +417,27 @@ async def line_webhook(request: Request, background_tasks: BackgroundTasks):
         msg = event.get("message", {})
         msg_type = msg.get("type")
         user_id = event.get("source", {}).get("userId", "")
+        reply_token = event.get("replyToken") or None
 
         if not user_id:
             continue
 
-        # V2: auto-create user on first contact. If new, send welcome + skip to onboarding.
+        # V2: auto-create user on first contact and send the welcome. Their
+        # first message is still processed below (so "login" as an opener
+        # works) — but the welcome takes the reply token, the follow-up
+        # response goes out as a push.
         is_new = db.get_user(user_id) is None
         db.get_or_create_user(user_id)
 
         if is_new:
-            background_tasks.add_task(_send_welcome, user_id)
-            continue
+            background_tasks.add_task(_send_welcome, user_id, reply_token)
+            reply_token = None  # consumed by the welcome
 
         # Process in the background so we return 200 to LINE immediately
         if msg_type == "text":
-            background_tasks.add_task(_process_text_message, user_id, msg["text"])
+            background_tasks.add_task(_process_text_message, user_id, msg["text"], reply_token)
         elif msg_type == "image":
-            background_tasks.add_task(_process_image_message, user_id, msg.get("id", ""))
+            background_tasks.add_task(_process_image_message, user_id, msg.get("id", ""), reply_token)
 
     return {"ok": True}
 

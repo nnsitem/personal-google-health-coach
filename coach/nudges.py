@@ -164,12 +164,13 @@ def _rule_bedtime_reminder(user_id: str, now: datetime) -> dict | None:
     if len(rows) < 2:
         return None
 
-    # Calculate average bedtime hour (in local time)
+    # Calculate average bedtime hour (in the user's local time — `now` carries
+    # the user's tz from run_nudge_check)
     bed_hours = []
     for row in rows:
         try:
             start = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
-            local_start = start.astimezone(TZ)
+            local_start = start.astimezone(now.tzinfo)
             bed_hours.append(local_start.hour + local_start.minute / 60)
         except (ValueError, TypeError):
             continue
@@ -269,7 +270,9 @@ def run_nudge_check(user_id: str) -> str | None:
     Returns the sent message text, or None if no nudge was sent.
     """
     db.init_db()
-    now = datetime.now(TZ)
+    # All rule hour checks, quiet hours, and day boundaries use the USER's
+    # local clock, not the server's.
+    now = datetime.now(db.user_tz(db.get_user(user_id)))
 
     # Guard: quiet hours
     if _is_quiet_hours(now):

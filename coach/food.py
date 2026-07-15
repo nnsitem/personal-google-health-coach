@@ -75,8 +75,11 @@ def _infer_meal_type(now: datetime) -> str:
 
 
 def _get_language(user_id: str) -> str:
-    """Read the user's preferred language from coach_memory. Returns a display
-    name suitable for prompting Gemini (e.g. 'Thai', 'English'). Defaults to English.
+    """The user's preferred language as a display name for prompting Gemini
+    (e.g. 'Thai', 'English').
+
+    coach_memory wins (it's what the user told the coach in conversation),
+    then the users.language column, then English.
     """
     try:
         with db.connect() as conn:
@@ -88,6 +91,9 @@ def _get_language(user_id: str) -> str:
             return row["content"].strip()
     except Exception:
         pass
+    user = db.get_user(user_id)
+    if user and user.get("language"):
+        return user["language"]
     return "English"
 
 
@@ -165,7 +171,7 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
     # Always derive meal type from the actual log time.
     meal_type = _infer_meal_type(now)
 
-    interval, _ = _interval_now()
+    interval, _ = _interval_now(now.tzinfo)
 
     calories = float(analysis.get("calories_kcal") or 0)
     protein = float(analysis.get("protein_g") or 0)
@@ -200,10 +206,10 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
     }
 
 
-def _interval_now() -> tuple[dict, datetime]:
-    """Build a 1-minute interval ending now, with local UTC offset."""
+def _interval_now(tz=None) -> tuple[dict, datetime]:
+    """Build a 1-minute interval ending now, with the given TZ's UTC offset."""
     from datetime import timedelta
-    now = datetime.now(TZ)
+    now = datetime.now(tz or TZ)
     end_dt = now.astimezone(timezone.utc)
     start_dt = end_dt - timedelta(minutes=1)
     offset_seconds = int(now.utcoffset().total_seconds()) if now.utcoffset() else 0
@@ -217,9 +223,9 @@ def _interval_now() -> tuple[dict, datetime]:
     return interval, now
 
 
-def _build_hydration_datapoint(analysis: dict) -> dict:
+def _build_hydration_datapoint(analysis: dict, tz=None) -> dict:
     """Build a Google Health HydrationLog DataPoint (volume in milliliters)."""
-    interval, _ = _interval_now()
+    interval, _ = _interval_now(tz)
     volume_ml = float(analysis.get("volume_ml") or 0)
     return {
         "dataSource": {"recordingMethod": "MANUAL"},
@@ -235,7 +241,8 @@ def log_food_to_health(user_id: str, analysis: dict) -> bool:
 
     Returns True on success, False on failure.
     """
-    now = datetime.now(TZ)
+    # Meal type (breakfast/lunch/...) follows the USER's local clock.
+    now = datetime.now(db.user_tz(db.get_user(user_id)))
     data_point = _build_nutrition_datapoint(analysis, now)
 
     try:
@@ -251,7 +258,7 @@ def log_food_to_health(user_id: str, analysis: dict) -> bool:
 
 def log_hydration_to_health(user_id: str, analysis: dict) -> bool:
     """Write the analyzed drink to Google Health as a hydration-log data point."""
-    data_point = _build_hydration_datapoint(analysis)
+    data_point = _build_hydration_datapoint(analysis, db.user_tz(db.get_user(user_id)))
     try:
         client = client_for_user(user_id)
         client.create_data_point("hydration-log", data_point)
