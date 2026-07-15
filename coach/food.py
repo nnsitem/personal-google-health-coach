@@ -48,6 +48,9 @@ If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
   "volume_ml": number,
   "is_water": true or false,
   "calories_kcal": number,
+  "protein_g": number,
+  "total_carbohydrate_g": number,
+  "total_fat_g": number,
   "notes": "one short sentence on assumptions (container size, fill level)"
 }
 
@@ -430,11 +433,29 @@ def _handle_drink(analysis: dict, labels: dict) -> str:
         log.info("drink volume is 0 — skipping hydration log")
         return labels["empty_drink"]
 
-    synced = log_hydration_to_health(analysis)
-    _store_food_log(analysis, synced)
+    synced_hydration = log_hydration_to_health(analysis)
+
+    # If the drink has significant calories/protein (e.g. protein shake, juice,
+    # smoothie), also log it as a nutrition entry.
+    cal = round(float(analysis.get("calories_kcal") or 0))
+    synced_nutrition = False
+    if cal > 10:
+        # Build a food-like analysis dict for the nutrition log
+        nutrition_analysis = {
+            "food_name_en": analysis.get("drink_name_en") or analysis.get("drink_name_local") or "drink",
+            "calories_kcal": analysis.get("calories_kcal", 0),
+            "protein_g": analysis.get("protein_g", 0),
+            "total_carbohydrate_g": analysis.get("total_carbohydrate_g", 0),
+            "total_fat_g": analysis.get("total_fat_g", 0),
+        }
+        synced_nutrition = log_food_to_health(nutrition_analysis)
+
+    _store_food_log(analysis, synced_hydration)
 
     name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
-    cal = round(float(analysis.get("calories_kcal") or 0))
+    protein = round(float(analysis.get("protein_g") or 0))
+    carbs = round(float(analysis.get("total_carbohydrate_g") or 0))
+    fat = round(float(analysis.get("total_fat_g") or 0))
     confidence = analysis.get("confidence", "medium")
 
     lines = [
@@ -444,11 +465,22 @@ def _handle_drink(analysis: dict, labels: dict) -> str:
     ]
     if cal > 0:
         lines.append(f"{labels['energy']}: 「{cal} kcal」")
+    if protein > 0:
+        lines.append(f"{labels['protein']}: 「{protein} g」")
+    if carbs > 0:
+        lines.append(f"{labels['carbs']}: 「{carbs} g」")
+    if fat > 0:
+        lines.append(f"{labels['fat']}: 「{fat} g」")
     if analysis.get("notes"):
         lines.append("")
         lines.append(f"📝 {analysis['notes']}")
     lines.append("")
-    lines.append(labels["synced_drink"] if synced else labels["not_synced"])
+    if synced_hydration and synced_nutrition:
+        lines.append(labels["synced_drink"] + " + " + labels["synced_food"])
+    elif synced_hydration:
+        lines.append(labels["synced_drink"])
+    else:
+        lines.append(labels["not_synced"])
     if confidence == "low":
         lines.append(labels["low_conf"])
 
