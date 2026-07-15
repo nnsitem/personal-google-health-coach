@@ -242,3 +242,103 @@ These issues were identified during v1 testing and should be addressed in v2:
    weekly and adjust the daily summary to reference the correct week's schedule.
 9. **Food photo context in chat** — Store the food analysis result as a chat
    message so the coach can reference "what you just ate" in follow-up questions.
+
+---
+
+## 13. Coaching improvement roadmap (post-v1)
+
+Prioritized by coaching-quality impact. These are independent of multi-user and
+can land in v1 or v2.
+
+### Tier 1 — richer health data (biggest quality gain)
+1. **Recovery/readiness signals** — sync HRV, SpO₂, respiratory rate. Combine
+   with resting-HR trend + sleep to compute a readiness score and open the daily
+   brief with a recovery verdict.
+2. **Exercise sessions** — populate the (currently unused) `exercise_sessions`
+   table so the coach sees actual workouts, tracks plan adherence, and gives
+   real feedback. Extend `sync.py` with a session sync.
+3. **Distance, floors, VO₂Max** — cheap adds for richer context.
+
+### Tier 2 — smarter coaching
+4. **Baseline-relative nudges** — trigger nudges against the user's own
+   `month_avg` (already computed in `stats.py`) instead of fixed thresholds.
+5. **Readiness-based daily focus** — adjust the workout suggestion to recovery state.
+6. **Structured coach memory** — evolve flat key-value into a profile (injuries,
+   dietary restrictions, goals, preferences) that shapes every response.
+7. **Nutrition goals loop** — track daily calorie/protein totals vs a target;
+   feed back into coaching ("30g protein short today").
+
+### Tier 3 — cost & performance
+8. **Image downscaling** — resize food photos to ~1024px before sending to
+   Gemini (phone photos are 2–4MB; wastes tokens/latency). Quick win.
+9. **Gemini context caching** — cache the stable system prompt for cache-read pricing.
+10. **Tiered sync** — sync fast-changing data hourly, heavy historical types less often.
+
+### Tier 4 — features
+11. **Voice messages** — LINE audio → transcribe → chat.
+12. **Trend charts** — weekly visual summary via Flex / chart image.
+13. **Scheduler misfire handling** — add `misfire_grace_time` so a missed daily
+    brief (container down at 7:30am) still fires on next startup.
+
+### Suggested next 3
+(1) HRV + readiness signals, (2) exercise-session sync, (3) image downscaling.
+
+---
+
+## 14. V2 scope review — what's actually needed vs not
+
+A critical pass on the multi-user plan, since building all of it is a large
+effort. Tiered by necessity for a **small, trusted group on your own Mac mini**.
+
+### ✅ Must-have (core of multi-user — unavoidable)
+- **`users` table + `user_id` scoping on every table/query** — this is the bulk
+  of the work and cannot be skipped.
+- **OAuth *web* flow** (`/auth/google` + callback) — the v1 CLI localhost flow
+  can't work for remote users; each user must authorize from their own phone.
+- **Gemini key setup via chat** — each user brings their own key.
+- **Per-user sync loop** — iterate users, use each one's token.
+- **Webhook auto-creates a user record** on first message; remove the single
+  `LINE_USER_ID` check.
+
+### 🟡 Should-have (important, but can phase in)
+- **Credential encryption (Fernet)** — you're storing *other people's* Google
+  tokens + API keys. On a personal Mac mini for a trusted group the risk is
+  lower, but if `data/` is ever backed up to cloud or the box is shared, this
+  matters. Recommend implementing, but it can follow the initial refactor.
+- **LINE Rich Menu** — good UX, but onboarding can start with text commands
+  ("login", "set key"). Add the menu once the flow works.
+- **Token-expiry / error notifications** — more important with multiple users
+  since you won't be watching logs for everyone.
+
+### 🟢 Optional / defer (nice, not needed to launch v2)
+- **"My Summary" on-demand button** — chat can already trigger this; skip until needed.
+- **Chat history / insights cleanup + annual VACUUM** — only matters after months
+  of accumulated data. Defer until the DB actually grows.
+- **Delete confirmation, workout-plan auto-progression, food-photo chat context**
+  — quality-of-life; not blockers for multi-user.
+
+### ⚠️ Real constraint to resolve first — Google OAuth verification
+The shared OAuth client is in **Testing mode**, which requires **each user's
+Google email to be added as a test user** (cap 100) and uses **restricted health
+scopes**. "Any user can sign up" is therefore not truly open:
+- **Option A (small group):** keep Testing mode, manually add each person's email
+  as a test user. Fine for friends/family; not self-serve.
+- **Option B (true open signup):** publish + pass Google's OAuth verification for
+  restricted scopes — a significant review process (privacy policy, security
+  assessment). Overkill for a small group.
+
+**Recommendation:** go with Option A. This makes "signup" a two-step process
+(you add their email as a test user, then they authorize). Document this clearly;
+it means v2 isn't fully self-serve, which is acceptable for the stated small-group scope.
+
+### Trimmed v2 build order (revised)
+1. `users` table + `user_id` migration + scope all queries
+2. Webhook auto-creates user; drop single-user check
+3. OAuth web flow (per-user Google auth from phone)
+4. Gemini key setup via chat
+5. Per-user sync loop
+6. Credential encryption
+7. Rich menu + notifications (polish)
+
+Everything in §10–13's "optional/defer" list is explicitly **out of scope for the
+initial v2 release**.
