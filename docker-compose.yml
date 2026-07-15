@@ -1,0 +1,29 @@
+services:
+  coach:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # SQLite DB + Google OAuth token persist here
+    ports:
+      - "127.0.0.1:8080:8080"     # LINE webhook, localhost only — public access via tunnel
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Cloudflare Tunnel — exposes the LINE webhook over HTTPS with a stable URL.
+  # Requires CLOUDFLARE_TUNNEL_TOKEN in .env and a tunnel route in the Cloudflare
+  # dashboard pointing your hostname (e.g. coach.signagegold.co) at http://coach:8080.
+  # Start both services with:  docker compose --profile webhook up -d --build
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - coach
+    profiles: ["webhook"]

@@ -1,0 +1,10 @@
+fastapi==0.116.*
+uvicorn[standard]==0.35.*
+apscheduler==3.11.*
+requests==2.32.*
+python-dotenv==1.1.*
+# google-auth >=2.48.1 required by google-genai; oauthlib 1.2.4+ dropped its <2.42 cap
+google-auth>=2.48.1
+google-auth-oauthlib>=1.2.4
+google-genai>=1.0
+line-bot-sdk>=3.0
