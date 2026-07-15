@@ -307,10 +307,16 @@ def handle_message(user_id: str, user_text: str) -> str:
         return reply
 
     try:
+        # Shorter budget than scheduled jobs — a person is waiting in chat.
         reply = gemini.generate(
             api_key, contents=full_prompt, system_instruction=CHAT_SYSTEM_PROMPT,
-            max_output_tokens=2048, min_chars=10,
+            max_output_tokens=2048, min_chars=10, max_wait=60,
         )
+    except gemini.GeminiQuotaExhausted:
+        log.warning("Gemini daily quota exhausted for user %s", user_id)
+        reply = ("⛔ Your Gemini AI key has used up its free daily quota. "
+                 "I'll be able to reply again after it resets at midnight US Pacific "
+                 "time (~2pm Thailand time).")
     except Exception:
         log.exception("Gemini call failed")
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
