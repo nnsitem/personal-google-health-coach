@@ -30,9 +30,33 @@ _TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", 
 # Errors meaning "this model won't work" — skip to the next model, don't wait.
 _SKIP_MARKERS = ("404", "NOT_FOUND", "PERMISSION_DENIED")
 
+# Thinking configs tried per model, cheapest first. thinking_level replaced the
+# legacy thinking_budget in the Gemini API; MINIMAL ≈ old budget=0 (no thinking,
+# fast). Some models reject levels they don't support (e.g. gemini-pro-latest
+# rejects MINIMAL but accepts LOW), so each model climbs this ladder on a
+# config-rejection 400 and the winning rung is cached for the process lifetime —
+# without the cache the bad config would be re-sent on every retry round.
+_THINKING_LADDER = ("MINIMAL", "LOW", None)  # None = model's default (dynamic)
+_model_thinking_rung: dict[str, int] = {}
+
 
 class GeminiUnavailable(RuntimeError):
     """Raised when all models stay unavailable for the whole time budget."""
+
+
+def _thinking_config(model: str):
+    """Build the thinking config for a model's current ladder rung (None = omit)."""
+    level = _THINKING_LADDER[_model_thinking_rung.get(model, 0)]
+    if level is None:
+        return None
+    try:
+        return genai.types.ThinkingConfig(thinking_level=level)
+    except Exception:
+        # SDK predates thinking_level — fall back to the legacy budget knob,
+        # which only maps cleanly to the "no thinking" rung.
+        if level == "MINIMAL":
+            return genai.types.ThinkingConfig(thinking_budget=0)
+        return None
 
 
 def generate(
@@ -40,7 +64,6 @@ def generate(
     contents,
     system_instruction: str | None = None,
     max_output_tokens: int = 2048,
-    thinking_budget: int = 0,
     max_wait: int | None = None,
     min_chars: int = 1,
 ) -> str:
@@ -58,34 +81,37 @@ def generate(
     client = genai.Client(api_key=api_key)
     models = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
 
-    def _build_config(use_thinking: bool):
+    def _build_config(model: str):
         cfg_kwargs = {"max_output_tokens": max_output_tokens}
-        if use_thinking:
-            # thinking_budget=0 disables "thinking" (faster, more output budget) —
-            # but some models (e.g. pro) REQUIRE thinking and reject budget=0.
-            cfg_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=thinking_budget)
+        thinking = _thinking_config(model)
+        if thinking is not None:
+            cfg_kwargs["thinking_config"] = thinking
         if system_instruction:
             cfg_kwargs["system_instruction"] = system_instruction
         return genai.types.GenerateContentConfig(**cfg_kwargs)
 
     def _try_model(model: str):
         """Call one model. Returns text on success, None on empty. Raises on error.
-        Adapts config if the model rejects the thinking budget."""
-        for use_thinking in (True, False):
+        On a thinking-config rejection, advances the model's ladder rung (cached
+        process-wide) and retries the same model with the next config."""
+        while True:
             try:
                 response = client.models.generate_content(
-                    model=model, contents=contents, config=_build_config(use_thinking)
+                    model=model, contents=contents, config=_build_config(model)
                 )
                 text = response.text
                 return text if (text and len(text.strip()) >= min_chars) else None
             except Exception as e:
                 msg = str(e).lower()
-                # Model requires thinking mode → retry same model without the budget config
-                if use_thinking and ("thinking" in msg or "budget" in msg):
-                    log.info("model %s requires thinking mode — retrying without budget", model)
+                rung = _model_thinking_rung.get(model, 0)
+                if rung < len(_THINKING_LADDER) - 1 and ("thinking" in msg or "budget" in msg):
+                    _model_thinking_rung[model] = rung + 1
+                    log.info(
+                        "model %s rejected thinking config %s — using %s from now on",
+                        model, _THINKING_LADDER[rung], _THINKING_LADDER[rung + 1],
+                    )
                     continue
                 raise
-        return None
 
     deadline = time.time() + max_wait
     last_error = None
@@ -114,11 +140,13 @@ def generate(
                     log.warning("model %s error (%s) — trying next", model, msg[:80])
                 continue
 
-        # All models failed this round. Wait (capped by remaining budget) then retry.
+        # All models failed this round. Wait (growing per round, capped by the
+        # remaining budget) then retry — hammering every few seconds during an
+        # overload just adds to the 503/429 pressure.
         remaining = deadline - time.time()
         if remaining <= 0:
             break
-        wait = min(5.0, remaining)
+        wait = min(5.0 * round_num, 30.0, remaining)
         log.info("all models busy (round %d) — waiting %.0fs before retry", round_num, wait)
         time.sleep(wait)
 

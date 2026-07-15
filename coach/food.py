@@ -124,6 +124,10 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
             api_key, contents=[prompt, image_part],
             max_output_tokens=1024,
         )
+    except gemini.GeminiUnavailable:
+        # Capacity outage, not a vision failure — let the caller tell the user
+        # honestly instead of replying "I can't tell if this is food".
+        raise
     except Exception:
         log.exception("food vision failed")
         return None
@@ -350,6 +354,7 @@ LABELS = {
         "low_conf": "(Estimate may be off — try a clearer photo for better accuracy)",
         "empty_drink": "🥤 This looks like an empty container, so I didn't log any hydration. Send a photo with a drink in it and I'll track it!",
         "empty_food": "🍽️ I couldn't estimate a real portion here, so nothing was logged. Try a clearer photo of the food.",
+        "ai_busy": "⏳ The AI service is very busy right now, so I couldn't analyze your photo. Please try sending it again in a few minutes!",
     },
     "th": {
         "unclear": "🤔 ผมดูรูปนี้แล้วไม่แน่ใจว่าเป็นอาหารหรือเครื่องดื่ม ลองถ่ายให้ชัดขึ้นอีกนิดได้ไหมครับ?",
@@ -364,6 +369,7 @@ LABELS = {
         "low_conf": "(ค่าประมาณอาจคลาดเคลื่อน ลองถ่ายชัด ๆ อีกครั้ง)",
         "empty_drink": "🥤 ดูเหมือนแก้ว/ขวดจะว่างเปล่า ผมเลยยังไม่ได้บันทึกนะครับ ถ้ามีน้ำอยู่ในภาพ ส่งมาใหม่ได้เลยครับ",
         "empty_food": "🍽️ ผมประเมินปริมาณอาหารไม่ได้ เลยยังไม่บันทึกครับ ลองถ่ายอาหารให้ชัดขึ้นอีกนิดนะครับ",
+        "ai_busy": "⏳ ตอนนี้ระบบ AI มีผู้ใช้งานเยอะมาก ผมเลยยังวิเคราะห์รูปไม่ได้ครับ อีกสักครู่ลองส่งรูปมาใหม่นะครับ",
     },
 }
 
@@ -379,7 +385,10 @@ def handle_food_photo(user_id: str, image_bytes: bytes, mime_type: str = "image/
     language = _get_language(user_id)
     labels = LABELS.get(_lang_code(language), LABELS["en"])
 
-    analysis = analyze_food_image(user_id, image_bytes, mime_type, language=language)
+    try:
+        analysis = analyze_food_image(user_id, image_bytes, mime_type, language=language)
+    except gemini.GeminiUnavailable:
+        return labels["ai_busy"]
     if not analysis or analysis.get("type") not in ("food", "drink"):
         return labels["unclear"]
 

@@ -36,9 +36,12 @@ TZ = ZoneInfo(os.environ.get("TZ", "UTC"))
 # Gemini (Google AI) settings
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-# Fallback models if primary is unavailable — ordered by capacity diversity so
-# a 503 on the flash tier can fall through to a different (pro) tier.
-GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-pro-latest"]
+# Fallback models if primary is unavailable — each must be a genuinely different
+# capacity tier or a flash 503 spike takes out the whole chain. Note that
+# gemini-flash-latest is an alias for gemini-3.5-flash (since 2026-05-19), so
+# listing 3.5-flash as a fallback adds nothing; flash-lite and pro run on
+# separate capacity (verified responsive during a flash 503 outage).
+GEMINI_FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-pro-latest"]
 # Total time budget (seconds) to keep retrying Gemini across models. Replies go
 # via LINE push (not a time-limited reply token), so we can afford a long window.
 GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
