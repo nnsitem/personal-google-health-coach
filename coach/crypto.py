@@ -52,8 +52,27 @@ def decrypt(ciphertext: str) -> str:
     try:
         return _fernet.decrypt(ciphertext.encode()).decode()
     except Exception:
-        # Value is likely unencrypted legacy data — return as-is
+        if ciphertext.startswith("gAAAAA"):
+            # Fernet ciphertext that our key can't open — almost certainly a
+            # rotated/changed ENCRYPTION_KEY. Returning it as-is makes the
+            # garbage flow downstream (e.g. 400s from Gemini), so shout.
+            log.warning(
+                "value looks Fernet-encrypted but failed to decrypt — has "
+                "ENCRYPTION_KEY changed? Returning raw ciphertext."
+            )
+        # Otherwise it's unencrypted legacy data — return as-is
         return ciphertext
+
+
+def is_encrypted(value: str) -> bool:
+    """True if the value is ciphertext our active key can decrypt."""
+    if not _fernet or not value:
+        return False
+    try:
+        _fernet.decrypt(value.encode())
+        return True
+    except Exception:
+        return False
 
 
 def is_enabled() -> bool:

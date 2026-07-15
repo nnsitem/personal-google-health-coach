@@ -13,7 +13,7 @@ from datetime import date, timedelta, datetime, timezone
 
 from coach import db
 from coach.config import SYNC_LOOKBACK_HOURS, TZ
-from coach.health_api import HealthAPIError, HealthClient
+from coach.health_api import HealthAPIError, HealthClient, client_for_user
 
 log = logging.getLogger(__name__)
 
@@ -132,10 +132,7 @@ def sync_list_types(user_id: str, client: HealthClient, start_date: str, end_dat
 def run_sync(user_id: str) -> None:
     db.init_db()
 
-    # Look up user's Google token for multi-user support; fall back to file-based auth
-    user = db.get_user(user_id)
-    token_json = (user.get("google_token_json") if user else None) or None
-    client = HealthClient(token_json=token_json)
+    client = client_for_user(user_id)
 
     today_local = datetime.now(TZ).date()
     # Cover trailing days for dailyRollUp (civil dates)
@@ -159,9 +156,7 @@ def run_backfill(user_id: str, days: int = 90) -> None:
     """
     db.init_db()
 
-    user = db.get_user(user_id)
-    token_json = (user.get("google_token_json") if user else None) or None
-    client = HealthClient(token_json=token_json)
+    client = client_for_user(user_id)
 
     today_local = datetime.now(TZ).date()
     end = today_local + timedelta(days=1)  # exclusive, includes today

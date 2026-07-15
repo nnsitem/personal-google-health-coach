@@ -16,7 +16,7 @@ from google import genai
 from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
-from coach.health_api import HealthClient, HealthAPIError
+from coach.health_api import HealthAPIError, client_for_user
 
 log = logging.getLogger(__name__)
 
@@ -238,13 +238,8 @@ def log_food_to_health(user_id: str, analysis: dict) -> bool:
     now = datetime.now(TZ)
     data_point = _build_nutrition_datapoint(analysis, now)
 
-    user = db.get_user(user_id)
-    token_json = (user.get("google_token_json") if user else None) or None
-    if not token_json:
-        log.warning("user %s has no Google token — skipping nutrition write", user_id)
-        return False
     try:
-        client = HealthClient(token_json=token_json)
+        client = client_for_user(user_id)
         client.create_data_point("nutrition-log", data_point)
         log.info("logged nutrition to Google Health: %s",
                  analysis.get("food_name_en") or analysis.get("food_name_local"))
@@ -257,13 +252,8 @@ def log_food_to_health(user_id: str, analysis: dict) -> bool:
 def log_hydration_to_health(user_id: str, analysis: dict) -> bool:
     """Write the analyzed drink to Google Health as a hydration-log data point."""
     data_point = _build_hydration_datapoint(analysis)
-    user = db.get_user(user_id)
-    token_json = (user.get("google_token_json") if user else None) or None
-    if not token_json:
-        log.warning("user %s has no Google token — skipping hydration write", user_id)
-        return False
     try:
-        client = HealthClient(token_json=token_json)
+        client = client_for_user(user_id)
         client.create_data_point("hydration-log", data_point)
         log.info("logged hydration to Google Health: %s ml", analysis.get("volume_ml"))
         return True
@@ -299,13 +289,8 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
         f'AND {field}.interval.civil_start_time < "{end}"'
     )
 
-    user = db.get_user(user_id)
-    token_json = (user.get("google_token_json") if user else None) or None
-    if not token_json:
-        log.warning("user %s has no Google token — cannot delete %s", user_id, data_type)
-        return None
     try:
-        client = HealthClient(token_json=token_json)
+        client = client_for_user(user_id)
         points = client.list_points(data_type, filter_str)
     except HealthAPIError as e:
         log.error("failed to list %s for delete: %s", data_type, e)

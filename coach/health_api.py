@@ -8,6 +8,7 @@ Data type names are kebab-case in URL paths (e.g., active-zone-minutes).
 `list` is a GET with query parameters including a filter string.
 """
 
+import logging
 import time
 from datetime import date
 
@@ -15,6 +16,8 @@ import requests
 
 from coach.auth import get_credentials
 from coach.config import GOOGLE_HEALTH_BASE
+
+log = logging.getLogger(__name__)
 
 
 class HealthAPIError(RuntimeError):
@@ -44,6 +47,7 @@ class HealthClient:
         be used on a per-user code path: falling back silently would read from
         or write to the OWNER's Google Health account on another user's behalf.
         """
+        self.token_refreshed = False
         if token_json:
             import json as _json
             from google.oauth2.credentials import Credentials
@@ -53,11 +57,16 @@ class HealthClient:
             if self._creds.expired and self._creds.refresh_token:
                 from google.auth.transport.requests import Request
                 self._creds.refresh(Request())
+                self.token_refreshed = True
         elif allow_default_credentials:
             self._creds = get_credentials()
         else:
             raise HealthAPIError(401, "no Google token for this user (re-authorize with 'login')", "local")
         self._session = requests.Session()
+
+    def token_json(self) -> str:
+        """The current credentials as a JSON string (post-refresh if one happened)."""
+        return self._creds.to_json()
 
     def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> dict:
         url = f"{GOOGLE_HEALTH_BASE}/{path.lstrip('/')}"
@@ -200,3 +209,25 @@ class HealthClient:
                 },
             },
         )
+
+
+def client_for_user(user_id: str) -> HealthClient:
+    """Build a HealthClient from the user's stored token.
+
+    If constructing the client refreshed the access token, the refreshed token
+    is persisted back to the users table — otherwise every subsequent call pays
+    the refresh round-trip again, and a rotated refresh token would be lost.
+    Raises HealthAPIError(401) when the user has no stored token.
+    """
+    from coach import db
+    user = db.get_user(user_id)
+    token_json = (user.get("google_token_json") if user else None) or None
+    client = HealthClient(token_json=token_json)
+    if client.token_refreshed:
+        try:
+            db.update_user(user_id, google_token_json=client.token_json())
+            log.info("persisted refreshed Google token for user %s", user_id)
+        except Exception:
+            # Best-effort: the in-memory credentials still work for this call.
+            log.exception("failed to persist refreshed token for user %s", user_id)
+    return client

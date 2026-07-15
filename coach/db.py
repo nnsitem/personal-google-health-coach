@@ -5,10 +5,13 @@ holds per-user configuration (Google token, Gemini key, preferences).
 """
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 
 from coach.config import DB_PATH
+
+log = logging.getLogger(__name__)
 
 # --- Schema (fresh install) -------------------------------------------------
 
@@ -239,7 +242,8 @@ def _user_id_in_pk(conn, table: str) -> bool:
 def _rebuild_pk_tables(conn) -> None:
     """Rebuild v1 tables whose PK didn't include user_id (SQLite can't ALTER PK).
 
-    Preserves all data (user_id was already backfilled by the ADD COLUMN step).
+    Preserves all rows; v1 rows carry user_id='' at this point and are
+    attributed to the v1 user afterwards by _adopt_orphan_rows().
     """
     for table, spec in _PK_REBUILD.items():
         # Skip if table doesn't exist yet (fresh install already has correct PK)
@@ -251,15 +255,78 @@ def _rebuild_pk_tables(conn) -> None:
         if _user_id_in_pk(conn, table):
             continue  # already migrated
 
-        log_msg = f"rebuilding {table} to add user_id to primary key"
-        import logging as _logging
-        _logging.getLogger(__name__).info(log_msg)
+        log.info("rebuilding %s to add user_id to primary key", table)
 
         cols = spec["cols"]
         conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
         conn.executescript(spec["create"])
         conn.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {table}_old")
         conn.execute(f"DROP TABLE {table}_old")
+
+
+_USER_TABLES = [
+    "metrics", "sleep_sessions", "exercise_sessions", "insights",
+    "goals", "chat_messages", "coach_memory", "sync_log",
+]
+
+
+def _adopt_orphan_rows(conn) -> None:
+    """Assign pre-v2 rows (user_id = '') to the sole user, if unambiguous.
+
+    v1 was single-user by construction, so when exactly one user exists the
+    orphans must be theirs. UPDATE OR IGNORE skips rows the post-migration
+    re-sync already recreated under the real user_id (those are fresher);
+    the skipped duplicates are then dropped.
+    """
+    orphaned = [
+        t for t in _USER_TABLES
+        if conn.execute(f"SELECT 1 FROM {t} WHERE user_id = '' LIMIT 1").fetchone()
+    ]
+    if not orphaned:
+        return
+    users = conn.execute("SELECT line_user_id FROM users").fetchall()
+    if len(users) != 1:
+        log.warning(
+            "orphan user_id='' rows in %s but %d users exist — cannot attribute, leaving as-is",
+            orphaned, len(users),
+        )
+        return
+    uid = users[0]["line_user_id"]
+    for table in orphaned:
+        conn.execute(f"UPDATE OR IGNORE {table} SET user_id = ? WHERE user_id = ''", (uid,))
+        dropped = conn.execute(f"DELETE FROM {table} WHERE user_id = ''").rowcount
+        log.info("adopted orphan v1 rows in %s for %s (%d duplicates dropped)", table, uid, dropped)
+
+
+def _encrypt_legacy_credentials(conn) -> None:
+    """One-time: encrypt credential columns stored before ENCRYPTION_KEY was set."""
+    from coach import crypto
+    if not crypto.is_enabled():
+        return
+    rows = conn.execute(
+        "SELECT line_user_id, google_token_json, gemini_api_key FROM users"
+    ).fetchall()
+    for row in rows:
+        updates = {}
+        for col in ("google_token_json", "gemini_api_key"):
+            val = row[col]
+            if not val or crypto.is_encrypted(val):
+                continue
+            if val.startswith("gAAAAA"):
+                # Ciphertext from a DIFFERENT key — re-encrypting would bury it
+                # one layer deeper. Leave it; decrypt() already warns loudly.
+                log.warning("users.%s for %s is undecryptable ciphertext — skipping",
+                            col, row["line_user_id"])
+                continue
+            updates[col] = crypto.encrypt(val)
+        if updates:
+            sets = ", ".join(f"{c} = ?" for c in updates)
+            conn.execute(
+                f"UPDATE users SET {sets} WHERE line_user_id = ?",
+                (*updates.values(), row["line_user_id"]),
+            )
+            log.info("encrypted legacy plaintext %s for user %s",
+                     sorted(updates), row["line_user_id"])
 
 
 def init_db(force: bool = False) -> None:
@@ -278,6 +345,10 @@ def init_db(force: bool = False) -> None:
                 pass  # column already exists
         # Migration step 2: rebuild tables whose PRIMARY KEY must include user_id
         _rebuild_pk_tables(conn)
+        # Migration step 3: attribute pre-v2 rows (user_id='') to the v1 user
+        _adopt_orphan_rows(conn)
+        # Migration step 4: encrypt credentials stored before ENCRYPTION_KEY existed
+        _encrypt_legacy_credentials(conn)
         conn.executescript(_INDEXES)
     _initialized = True
 
