@@ -8,10 +8,9 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from google import genai
-
 from coach import db
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach import gemini
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 from coach.line import send_text, LineError
 
 log = logging.getLogger(__name__)
@@ -137,8 +136,6 @@ def build_weekly_snapshot(user_id: str) -> dict:
 
 def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
     """Generate the weekly report using Gemini."""
-    import time
-
     user = db.get_user(user_id)
     api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
     if not api_key:
@@ -147,47 +144,23 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
     if snapshot is None:
         snapshot = build_weekly_snapshot(user_id)
 
-    client = genai.Client(api_key=api_key)
-
     user_message = (
         "Here is my complete health data for the past week:\n\n"
         f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
         "Generate my weekly health report."
     )
 
-    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=user_message,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=WEEKLY_SYSTEM_PROMPT,
-                        max_output_tokens=4096,
-                        thinking_config=genai.types.ThinkingConfig(
-                            thinking_budget=0,
-                        ),
-                    ),
-                )
-                text = response.text
-                if text and len(text) > 100:
-                    with db.connect() as conn:
-                        conn.execute(
-                            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'weekly_report', ?, 0)",
-                            (user_id, text),
-                        )
-                    return text
-            except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(2 ** attempt)
-                    continue
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    break
-                else:
-                    raise
+    text = gemini.generate(
+        api_key, contents=user_message, system_instruction=WEEKLY_SYSTEM_PROMPT,
+        max_output_tokens=4096, min_chars=100,
+    )
 
-    raise RuntimeError("Failed to generate weekly report — all models unavailable")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'weekly_report', ?, 0)",
+            (user_id, text),
+        )
+    return text
 
 
 def run_weekly_report(user_id: str) -> str:

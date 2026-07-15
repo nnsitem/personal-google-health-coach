@@ -6,13 +6,11 @@ along with a coaching system prompt and returns a WhatsApp-formatted message.
 
 import json
 import logging
-import time
 from datetime import date, datetime, timedelta
 
-from google import genai
-
 from coach import db
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach import gemini
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 
 log = logging.getLogger(__name__)
 
@@ -225,8 +223,6 @@ def generate_daily_summary(user_id: str, snapshot: dict | None = None) -> str:
     if snapshot is None:
         snapshot = build_daily_snapshot(user_id)
 
-    client = genai.Client(api_key=api_key)
-
     user_message = (
         "Here is my health data snapshot for today's briefing:\n\n"
         f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
@@ -235,47 +231,18 @@ def generate_daily_summary(user_id: str, snapshot: dict | None = None) -> str:
         "Keep it under 900 characters total."
     )
 
-    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
-    last_error = None
+    message_text = gemini.generate(
+        api_key, contents=user_message, system_instruction=SYSTEM_PROMPT,
+        max_output_tokens=2048, min_chars=50,
+    )
 
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=user_message,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        max_output_tokens=2048,
-                        thinking_config=genai.types.ThinkingConfig(
-                            thinking_budget=0,
-                        ),
-                    ),
-                )
-                message_text = response.text
-                if message_text and len(message_text) > 50:
-                    # Store the generated insight
-                    with db.connect() as conn:
-                        conn.execute(
-                            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'daily_summary', ?, 0)",
-                            (user_id, message_text),
-                        )
-                    return message_text
-                log.warning("model %s returned short response (%d chars), retrying...", model, len(message_text or ""))
-            except Exception as e:
-                last_error = e
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    log.warning("model %s unavailable (attempt %d), retrying...", model, attempt + 1)
-                    time.sleep(2 ** attempt)
-                    continue
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    log.warning("model %s not found, trying next...", model)
-                    break  # skip to next model
-                else:
-                    raise
-        # Move to next model
-
-    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+    # Store the generated insight
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'daily_summary', ?, 0)",
+            (user_id, message_text),
+        )
+    return message_text
 
 
 if __name__ == "__main__":

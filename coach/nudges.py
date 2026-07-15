@@ -17,10 +17,9 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from google import genai
-
 from coach import db
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach import gemini
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 from coach.line import send_text, LineError
 
 log = logging.getLogger(__name__)
@@ -243,45 +242,21 @@ def _recently_sent(user_id: str, nudge_type: str, now: datetime) -> bool:
 
 def _generate_nudge_message(user_id: str, condition: str) -> str:
     """Use Gemini to turn a condition into a friendly nudge message."""
-    import time as _time
-
     user = db.get_user(user_id)
     api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
     if not api_key:
         return f"💡 {condition}"
 
-    client = genai.Client(api_key=api_key)
     user_message = f"Nudge condition: {condition}\n\nGenerate a brief, friendly nudge message."
 
-    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=user_message,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=NUDGE_SYSTEM_PROMPT,
-                        max_output_tokens=1024,
-                        thinking_config=genai.types.ThinkingConfig(
-                            thinking_budget=0,
-                        ),
-                    ),
-                )
-                text = response.text
-                if text and len(text) > 20:
-                    return text
-            except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    _time.sleep(2 ** attempt)
-                    continue
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    break
-                else:
-                    raise
-
-    # Fallback: just send the condition as-is
-    return f"💡 {condition}"
+    try:
+        return gemini.generate(
+            api_key, contents=user_message, system_instruction=NUDGE_SYSTEM_PROMPT,
+            max_output_tokens=1024, min_chars=20,
+        )
+    except Exception:
+        log.warning("nudge generation failed, using raw condition")
+        return f"💡 {condition}"
 
 
 # ---------------------------------------------------------------------------

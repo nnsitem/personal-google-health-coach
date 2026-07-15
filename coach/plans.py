@@ -10,10 +10,9 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from google import genai
-
 from coach import db
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach import gemini
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 
 log = logging.getLogger(__name__)
 
@@ -47,14 +46,10 @@ def create_workout_plan(user_id: str, user_request: str, context: dict) -> dict:
 
     Returns the plan dict and saves it to the goals table.
     """
-    import time
-
     user = db.get_user(user_id)
     api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
     if not api_key:
         raise RuntimeError("No Gemini API key configured")
-
-    client = genai.Client(api_key=api_key)
 
     prompt = (
         f"User request: {user_request}\n\n"
@@ -62,37 +57,15 @@ def create_workout_plan(user_id: str, user_request: str, context: dict) -> dict:
         "Create a workout plan as a JSON object."
     )
 
-    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=PLAN_SYSTEM_PROMPT,
-                        max_output_tokens=2048,
-                        thinking_config=genai.types.ThinkingConfig(
-                            thinking_budget=0,
-                        ),
-                    ),
-                )
-                text = response.text
-                # Extract JSON from response
-                plan = _extract_json(text)
-                if plan:
-                    save_plan(user_id, plan)
-                    return plan
-            except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(2 ** attempt)
-                    continue
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    break
-                else:
-                    raise
-
-    raise RuntimeError("Failed to create workout plan")
+    text = gemini.generate(
+        api_key, contents=prompt, system_instruction=PLAN_SYSTEM_PROMPT,
+        max_output_tokens=2048,
+    )
+    plan = _extract_json(text)
+    if plan:
+        save_plan(user_id, plan)
+        return plan
+    raise RuntimeError("Failed to parse workout plan from model response")
 
 
 def _extract_json(text: str) -> dict | None:

@@ -36,8 +36,12 @@ TZ = ZoneInfo(os.environ.get("TZ", "UTC"))
 # Gemini (Google AI) settings
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-# Fallback models if primary is unavailable
-GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash"]
+# Fallback models if primary is unavailable — ordered by capacity diversity so
+# a 503 on the flash tier can fall through to a different (pro) tier.
+GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-pro-latest"]
+# Total time budget (seconds) to keep retrying Gemini across models. Replies go
+# via LINE push (not a time-limited reply token), so we can afford a long window.
+GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
 
 # Daily summary delivery time (local TZ)
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "7"))

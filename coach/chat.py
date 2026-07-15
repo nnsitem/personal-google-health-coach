@@ -9,13 +9,11 @@ Run standalone test:  python -m coach.chat "How did I sleep last night?"
 
 import json
 import logging
-import time
 from datetime import datetime, timedelta
 
-from google import genai
-
 from coach import db
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach import gemini
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 from coach.plans import create_workout_plan, get_current_plan
 
 log = logging.getLogger(__name__)
@@ -308,40 +306,13 @@ def handle_message(user_id: str, user_text: str) -> str:
         _save_chat_message(user_id, "coach", reply)
         return reply
 
-    client = genai.Client(api_key=api_key)
-    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
-    reply = None
-
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=full_prompt,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=CHAT_SYSTEM_PROMPT,
-                        max_output_tokens=2048,
-                        thinking_config=genai.types.ThinkingConfig(
-                            thinking_budget=0,
-                        ),
-                    ),
-                )
-                reply = response.text
-                if reply and len(reply) > 10:
-                    break
-            except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(2 ** attempt)
-                    continue
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    break
-                else:
-                    log.exception("Gemini call failed")
-                    break
-        if reply and len(reply) > 10:
-            break
-
-    if not reply:
+    try:
+        reply = gemini.generate(
+            api_key, contents=full_prompt, system_instruction=CHAT_SYSTEM_PROMPT,
+            max_output_tokens=2048, min_chars=10,
+        )
+    except Exception:
+        log.exception("Gemini call failed")
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
 
     # Extract and process directives (memory + plan creation + delete)

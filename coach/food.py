@@ -9,13 +9,13 @@ manually-populated nutrient payload.
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 
 from google import genai
 
 from coach import db
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODELS, TZ
+from coach import gemini
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 from coach.health_api import HealthClient, HealthAPIError
 
 log = logging.getLogger(__name__)
@@ -110,9 +110,6 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
     if not api_key:
         raise RuntimeError("No Gemini API key configured")
 
-    client = genai.Client(api_key=api_key)
-    image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-
     # The '*_en' name must be English (used for the Google Health log); the
     # '*_local' name and 'notes' must be in the user's language (for the reply).
     prompt = FOOD_VISION_PROMPT + (
@@ -121,30 +118,18 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
         "and the 'type' value exactly as specified in English."
     )
 
-    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=[prompt, image_part],
-                    config=genai.types.GenerateContentConfig(
-                        max_output_tokens=1024,
-                        thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
-                    ),
-                )
-                data = _extract_json(response.text)
-                if data and data.get("type") in ("food", "drink"):
-                    return data
-            except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(2 ** attempt)
-                    continue
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    break
-                else:
-                    log.exception("food vision failed")
-                    break
+    image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+    try:
+        text = gemini.generate(
+            api_key, contents=[prompt, image_part],
+            max_output_tokens=1024,
+        )
+    except Exception:
+        log.exception("food vision failed")
+        return None
+    data = _extract_json(text)
+    if data and data.get("type") in ("food", "drink"):
+        return data
     return None
 
 
