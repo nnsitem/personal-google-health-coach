@@ -56,7 +56,8 @@ def _rule_low_steps(user_id: str, now: datetime) -> dict | None:
     today = now.date().isoformat()
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT value_json FROM metrics WHERE user_id = ? AND day = ? AND data_type = 'steps'",
+            "SELECT value_json FROM metrics WHERE user_id = ? AND day = ? AND data_type = 'steps' "
+            "ORDER BY updated_at DESC",
             (user_id, today),
         ).fetchone()
 
@@ -89,7 +90,8 @@ def _rule_step_streak(user_id: str, now: datetime) -> dict | None:
         day = (today - timedelta(days=i)).isoformat()
         with db.connect() as conn:
             row = conn.execute(
-                "SELECT value_json FROM metrics WHERE user_id = ? AND day = ? AND data_type = 'steps'",
+                "SELECT value_json FROM metrics WHERE user_id = ? AND day = ? AND data_type = 'steps' "
+                "ORDER BY updated_at DESC",
                 (user_id, day),
             ).fetchone()
         if not row:

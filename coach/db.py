@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS metrics (
     user_id    TEXT NOT NULL DEFAULT '',
     day        TEXT NOT NULL,
-    hour       INTEGER,
+    hour       INTEGER NOT NULL DEFAULT -1,  -- -1 = daily value; NULL is forbidden
+                                             -- because SQLite treats NULLs as
+                                             -- DISTINCT in a PK, which breaks upserts
     data_type  TEXT NOT NULL,
     value_json TEXT NOT NULL,
     source     TEXT NOT NULL DEFAULT '',
@@ -270,6 +272,55 @@ _USER_TABLES = [
 ]
 
 
+def _metrics_hour_nullable(conn) -> bool:
+    for r in conn.execute("PRAGMA table_info(metrics)"):
+        if r["name"] == "hour":
+            return not r["notnull"]
+    return False
+
+
+def _rebuild_metrics_dedupe(conn) -> None:
+    """Fix the NULL-hour primary-key hole and drop the stale duplicates it left.
+
+    `hour` was a nullable PK column, and SQLite treats every NULL as DISTINCT
+    inside a primary key — so for daily rows (hour=NULL) the upsert's
+    ON CONFLICT never fired and each sync INSERTED a fresh row instead of
+    updating. Readers that grabbed the first row then served hours-old values
+    (e.g. a nudge quoting the just-after-midnight step count at night).
+    Rebuild with hour NOT NULL DEFAULT -1, keeping only the newest row per
+    logical key.
+    """
+    if not _metrics_hour_nullable(conn):
+        return
+    before = conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0]
+    log.info("rebuilding metrics: hour NULL -> -1 sentinel + dedupe (%d rows)", before)
+    conn.execute("ALTER TABLE metrics RENAME TO metrics_old")
+    conn.executescript("""
+        CREATE TABLE metrics (
+            user_id    TEXT NOT NULL DEFAULT '',
+            day        TEXT NOT NULL,
+            hour       INTEGER NOT NULL DEFAULT -1,
+            data_type  TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            source     TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, day, hour, data_type, source)
+        )
+    """)
+    # SQLite guarantees bare columns accompany the MAX() row in a GROUP BY,
+    # so value_json comes from the newest row of each group.
+    conn.execute("""
+        INSERT INTO metrics (user_id, day, hour, data_type, value_json, source, updated_at)
+        SELECT user_id, day, COALESCE(hour, -1), data_type, value_json, source, MAX(updated_at)
+        FROM metrics_old
+        GROUP BY user_id, day, COALESCE(hour, -1), data_type, source
+    """)
+    conn.execute("DROP TABLE metrics_old")
+    after = conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0]
+    log.info("metrics rebuilt: %d -> %d rows (%d stale duplicates removed)",
+             before, after, before - after)
+
+
 def _adopt_orphan_rows(conn) -> None:
     """Assign pre-v2 rows (user_id = '') to the sole user, if unambiguous.
 
@@ -345,6 +396,8 @@ def init_db(force: bool = False) -> None:
                 pass  # column already exists
         # Migration step 2: rebuild tables whose PRIMARY KEY must include user_id
         _rebuild_pk_tables(conn)
+        # Migration step 2b: fix the NULL-hour PK hole in metrics + dedupe
+        _rebuild_metrics_dedupe(conn)
         # Migration step 3: attribute pre-v2 rows (user_id='') to the v1 user
         _adopt_orphan_rows(conn)
         # Migration step 4: encrypt credentials stored before ENCRYPTION_KEY existed
@@ -496,6 +549,9 @@ def list_active_users() -> list[dict]:
 # --- Data helpers (all scoped by user_id) -----------------------------------
 
 def upsert_metric(user_id: str, day: str, hour: int | None, data_type: str, value, source: str = "") -> None:
+    # hour=None means a daily value; stored as -1 because a NULL inside the
+    # primary key would never trigger ON CONFLICT (NULLs are distinct in
+    # SQLite PKs) and every sync would insert a duplicate row.
     with connect() as conn:
         conn.execute(
             """
@@ -504,7 +560,7 @@ def upsert_metric(user_id: str, day: str, hour: int | None, data_type: str, valu
             ON CONFLICT(user_id, day, hour, data_type, source)
             DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')
             """,
-            (user_id, day, hour, data_type, json.dumps(value), source),
+            (user_id, day, -1 if hour is None else hour, data_type, json.dumps(value), source),
         )
 
 
