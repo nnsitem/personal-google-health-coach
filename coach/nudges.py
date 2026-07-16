@@ -248,7 +248,12 @@ def _generate_nudge_message(user_id: str, condition: str) -> str:
     if not api_key:
         return f"💡 {condition}"
 
-    user_message = f"Nudge condition: {condition}\n\nGenerate a brief, friendly nudge message."
+    language = db.get_user_language(user_id)
+    user_message = (
+        f"Nudge condition: {condition}\n\n"
+        f"Write the entire nudge message in {language}. "
+        f"Generate a brief, friendly nudge message."
+    )
 
     try:
         return gemini.generate(

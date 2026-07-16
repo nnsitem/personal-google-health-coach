@@ -428,6 +428,33 @@ def user_tz(user: dict | None):
     return TZ
 
 
+def get_user_language(user_id: str) -> str:
+    """The user's preferred language as a display name for prompting Gemini
+    (e.g. 'Thai', 'English').
+
+    Resolution order: coach_memory 'language' entry (what the user told the
+    coach in conversation) → users.language column → 'English'.
+
+    System-generated messages (nudges, daily summary, weekly report) have no
+    inbound user text for the model to mirror, so they MUST inject this value
+    explicitly or they default to English.
+    """
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT content FROM coach_memory WHERE user_id = ? AND lower(name) = 'language'",
+                (user_id,),
+            ).fetchone()
+        if row and row["content"]:
+            return row["content"].strip()
+    except Exception:
+        pass
+    user = get_user(user_id)
+    if user and user.get("language"):
+        return user["language"]
+    return "English"
+
+
 def insight_sent_today(user_id: str, kind: str, tz) -> bool:
     """Whether an insight of this kind exists since the user's local midnight.
 

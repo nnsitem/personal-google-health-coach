@@ -145,10 +145,11 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
     if snapshot is None:
         snapshot = build_weekly_snapshot(user_id)
 
+    language = db.get_user_language(user_id)
     user_message = (
         "Here is my complete health data for the past week:\n\n"
         f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
-        "Generate my weekly health report."
+        f"Generate my weekly health report. Write the entire report in {language}."
     )
 
     text = gemini.generate(

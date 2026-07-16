@@ -224,12 +224,14 @@ def generate_daily_summary(user_id: str, snapshot: dict | None = None) -> str:
     if snapshot is None:
         snapshot = build_daily_snapshot(user_id)
 
+    language = db.get_user_language(user_id)
     user_message = (
         "Here is my health data snapshot for today's briefing:\n\n"
         f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
         "Generate my complete daily morning health briefing. "
         "Include sleep recap, activity recap, and a motivational closing. "
-        "Keep it under 900 characters total."
+        "Keep it under 900 characters total. "
+        f"Write the entire briefing in {language}."
     )
 
     message_text = gemini.generate(

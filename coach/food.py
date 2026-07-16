@@ -76,25 +76,9 @@ def _infer_meal_type(now: datetime) -> str:
 
 def _get_language(user_id: str) -> str:
     """The user's preferred language as a display name for prompting Gemini
-    (e.g. 'Thai', 'English').
-
-    coach_memory wins (it's what the user told the coach in conversation),
-    then the users.language column, then English.
+    (e.g. 'Thai', 'English'). Delegates to the shared resolver in db.
     """
-    try:
-        with db.connect() as conn:
-            row = conn.execute(
-                "SELECT content FROM coach_memory WHERE user_id = ? AND lower(name) = 'language'",
-                (user_id,),
-            ).fetchone()
-        if row and row["content"]:
-            return row["content"].strip()
-    except Exception:
-        pass
-    user = db.get_user(user_id)
-    if user and user.get("language"):
-        return user["language"]
-    return "English"
+    return db.get_user_language(user_id)
 
 
 def _lang_code(language: str) -> str:

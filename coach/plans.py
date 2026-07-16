@@ -51,10 +51,13 @@ def create_workout_plan(user_id: str, user_request: str, context: dict) -> dict:
     if not api_key:
         raise RuntimeError("No Gemini API key configured")
 
+    language = db.get_user_language(user_id)
     prompt = (
         f"User request: {user_request}\n\n"
         f"Health context:\n```json\n{json.dumps(context, indent=2)}\n```\n\n"
-        "Create a workout plan as a JSON object."
+        "Create a workout plan as a JSON object. "
+        f"Keep the JSON keys in English, but write all human-readable text "
+        f"values (exercise names, descriptions, notes) in {language}."
     )
 
     text = gemini.generate(

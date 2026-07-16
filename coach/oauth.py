@@ -37,18 +37,31 @@ def _get_state_secret() -> str:
     return os.environ.get("ENCRYPTION_KEY") or os.environ.get("LINE_CHANNEL_SECRET") or "dev-secret"
 
 
+# Separator between the user_id and signature in the state token. Must be a
+# URL-safe *unreserved* character (RFC 3986) so messaging clients like LINE keep
+# the whole URL clickable — a '|' is NOT unreserved and gets cut off, breaking
+# the link. Both the user_id (LINE 'U' + hex) and signature (hex) are
+# alphanumeric, so '.' is a safe delimiter.
+_STATE_SEP = "."
+
+
 def _sign_state(user_id: str) -> str:
-    """Create a signed state string: user_id|signature."""
+    """Create a signed state string: user_id.signature."""
     secret = _get_state_secret()
     sig = hmac.new(secret.encode(), user_id.encode(), hashlib.sha256).hexdigest()[:16]
-    return f"{user_id}|{sig}"
+    return f"{user_id}{_STATE_SEP}{sig}"
 
 
 def _verify_state(state: str) -> str | None:
-    """Verify and extract user_id from a signed state. Returns user_id or None."""
-    if "|" not in state:
+    """Verify and extract user_id from a signed state. Returns user_id or None.
+
+    Accepts both the current '.' separator and the legacy '|' separator so any
+    login links generated before the fix still validate.
+    """
+    sep = _STATE_SEP if _STATE_SEP in state else ("|" if "|" in state else None)
+    if sep is None:
         return None
-    user_id, sig = state.rsplit("|", 1)
+    user_id, sig = state.rsplit(sep, 1)
     expected_sig = hmac.new(
         _get_state_secret().encode(), user_id.encode(), hashlib.sha256
     ).hexdigest()[:16]
