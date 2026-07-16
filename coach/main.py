@@ -39,12 +39,18 @@ scheduler = BackgroundScheduler(timezone=str(TZ))
 def _safe_sync_all() -> None:
     """Hourly sync for all active users with a Google token."""
     from coach.sync import run_sync
+    from coach import notify
     for user in db.list_active_users():
         uid = user["line_user_id"]
         try:
             run_sync(uid)
-        except Exception:
+            notify.record_success(uid, "google_auth", "sync")
+        except Exception as e:
             log.exception("sync failed for user %s", uid)
+            # Auth breakage gets its own "reconnect" message; anything else
+            # counts toward a generic sync-trouble notification.
+            kind = "google_auth" if notify.is_auth_error(e) else "sync"
+            notify.record_failure(uid, kind, str(e))
 
 
 def _safe_daily_summary_all() -> None:
@@ -55,6 +61,7 @@ def _safe_daily_summary_all() -> None:
     server-TZ time, so users.timezone is honored per user.
     """
     from coach.daily import run_daily_summary
+    from coach import notify
     for user in db.list_active_users():
         uid = user["line_user_id"]
         if not user.get("gemini_api_key"):
@@ -66,8 +73,11 @@ def _safe_daily_summary_all() -> None:
             continue  # already generated today (e.g. misfire catch-up ran late)
         try:
             run_daily_summary(uid)
-        except Exception:
+            notify.record_success(uid, "daily_summary")
+        except Exception as e:
             log.exception("daily summary failed for user %s", uid)
+            # Runs once per local day, so threshold 2 = two missed mornings.
+            notify.record_failure(uid, "daily_summary", str(e), threshold=2)
 
 
 def _safe_nudge_check_all() -> None:

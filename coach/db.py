@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS sync_log (
     ok        INTEGER NOT NULL,
     detail    TEXT
 );
+
+CREATE TABLE IF NOT EXISTS failure_state (
+    user_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,              -- 'google_auth' | 'sync' | 'daily_summary'
+    count       INTEGER NOT NULL DEFAULT 0, -- consecutive failures; reset on success
+    notified    INTEGER NOT NULL DEFAULT 0, -- 1 once the user has been told this streak
+    last_detail TEXT,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, kind)
+);
 """
 
 # --- Migration (v1 → v2): add user_id + users table to existing DBs --------
@@ -576,6 +586,49 @@ def upsert_sleep_session(user_id: str, start: str, end: str, stages, efficiency=
                           score = excluded.score
             """,
             (user_id, start, end, json.dumps(stages), efficiency, score),
+        )
+
+
+def bump_failure(user_id: str, kind: str, detail: str = "") -> tuple[int, bool]:
+    """Record one more consecutive failure of `kind` for this user.
+
+    Returns (count, already_notified) AFTER the increment, so the caller can
+    decide whether the notification threshold was just crossed.
+    """
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO failure_state (user_id, kind, count, last_detail, updated_at)
+            VALUES (?, ?, 1, ?, datetime('now'))
+            ON CONFLICT(user_id, kind)
+            DO UPDATE SET count = count + 1,
+                          last_detail = excluded.last_detail,
+                          updated_at = datetime('now')
+            """,
+            (user_id, kind, detail[:2000]),
+        )
+        row = conn.execute(
+            "SELECT count, notified FROM failure_state WHERE user_id = ? AND kind = ?",
+            (user_id, kind),
+        ).fetchone()
+    return (row["count"], bool(row["notified"])) if row else (1, False)
+
+
+def mark_failure_notified(user_id: str, kind: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE failure_state SET notified = 1, updated_at = datetime('now') "
+            "WHERE user_id = ? AND kind = ?",
+            (user_id, kind),
+        )
+
+
+def clear_failures(user_id: str, kind: str) -> None:
+    """Reset the failure streak on success. Cheap no-op when no row exists."""
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM failure_state WHERE user_id = ? AND kind = ?",
+            (user_id, kind),
         )
 
 
