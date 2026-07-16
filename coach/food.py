@@ -45,17 +45,32 @@ If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
   "drink_name_en": "short drink name in ENGLISH (e.g. 'water bottle', 'iced coffee')",
   "drink_name_local": "the same name in the user's language",
   "confidence": "high | medium | low",
+  "container_count": number,
   "volume_ml": number,
   "is_water": true or false,
   "calories_kcal": number,
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
-  "notes": "one short sentence on assumptions (container size, fill level)"
+  "notes": "one short sentence on assumptions (how many containers, size each)"
 }
 
-Estimate realistic values for what's shown. Estimate volume_ml from the container
-size and how full it looks. If you can't tell what it is, set "type" to "unknown".
+DRINK volume rules (important — read carefully):
+- COUNT every drink container in the photo and put that number in "container_count".
+  Two bottles = 2, three glasses = 3, etc.
+- "volume_ml" is the TOTAL across ALL containers, not one.
+- The user photographs a drink to log what they consumed. Count EVERY container
+  at its full/normal serving size (e.g. a typical water bottle ≈ 500 ml, a small
+  bottle ≈ 330 ml, a glass ≈ 250 ml), regardless of how full or empty it currently
+  looks. An empty bottle means the user already drank it, so it STILL counts as one
+  full serving. Do NOT reduce the volume based on the leftover liquid level.
+- Example: two 500 ml water bottles (full, half, or empty) → container_count 2,
+  volume_ml 1000.
+- All the nutrition fields (calories, protein, etc.) must also be TOTALS across
+  all containers.
+
+Estimate realistic values for what's shown. If there is no drink container at all
+in the photo, set "type" to "unknown".
 """
 
 
@@ -328,6 +343,7 @@ LABELS = {
         "carbs": "🍞 Carbs",
         "fat": "🥑 Fat",
         "volume": "🥤 Volume",
+        "containers": "🧴 Containers",
         "synced_food": "✅ Logged to Google Health",
         "synced_drink": "✅ Hydration logged to Google Health",
         "not_synced": "⚠️ Analyzed, but couldn't save to Google Health",
@@ -344,6 +360,7 @@ LABELS = {
         "carbs": "🍞 คาร์บ",
         "fat": "🥑 ไขมัน",
         "volume": "🥤 ปริมาณ",
+        "containers": "🧴 จำนวนภาชนะ",
         "synced_food": "✅ บันทึกลง Google Health เรียบร้อยแล้ว",
         "synced_drink": "✅ บันทึกการดื่มน้ำลง Google Health แล้ว",
         "not_synced": "⚠️ วิเคราะห์สำเร็จ แต่ยังบันทึกลง Google Health ไม่ได้",
@@ -451,11 +468,14 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict) -> str:
     fat = round(float(analysis.get("total_fat_g") or 0))
     confidence = analysis.get("confidence", "medium")
 
+    count = int(float(analysis.get("container_count") or 1))
     lines = [
         f"💧 {name}",
         "",
-        f"{labels['volume']}: 「{ml} ml」",
     ]
+    if count > 1:
+        lines.append(f"{labels['containers']}: 「{count}」")
+    lines.append(f"{labels['volume']}: 「{ml} ml」")
     if cal > 0:
         lines.append(f"{labels['energy']}: 「{cal} kcal」")
     if protein > 0:
