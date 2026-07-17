@@ -69,6 +69,14 @@ Special abilities (use these directives on their own line at the END of your rep
   - Only log when the user asks to log/record something — not when food is merely mentioned.
   - In your visible reply, confirm the item with the estimated calories (or volume) and
     the meal slot if given. Do NOT say it was saved — the system appends the real save status.
+- To change the QUANTITY of the most recent food/drink log when the user says how much they
+  actually had (e.g. "กินไปแล้ว 4 รอบ" right after a log, "I had 4 of those", "only drank half"):
+  [ADJUST_LAST: {"kind": "drink", "times": 4}]
+  "times" is the TOTAL multiple of the originally logged amount (4 = four servings in total,
+  0.5 = half a serving). kind is "food" or "drink" — check the recent food/drink logs in your
+  context to see what the last log was, and confirm the new total in your visible reply
+  (e.g. 4 × 200 ml = 「800 ml」). Do NOT also emit LOG_FOOD/LOG_DRINK for the same item.
+  The system appends the real save status.
 """
 
 
@@ -147,6 +155,42 @@ def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
             "awake_min": round(totals["AWAKE"]),
         })
     return sessions
+
+
+def _get_recent_food_logs(user_id: str, hours: int = 48, limit: int = 8) -> list[dict]:
+    """Recent food/drink logs (photo or chat), newest first, summarized for
+    the chat context — so the coach knows what "the last log" was and can
+    answer follow-ups like "กินไปแล้ว 4 รอบ" / "make that 4"."""
+    from datetime import timezone as _timezone
+    cutoff = (datetime.now(_timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT ts, content FROM insights "
+            "WHERE user_id = ? AND kind = 'food_log' AND ts >= ? "
+            "ORDER BY ts DESC LIMIT ?",
+            (user_id, cutoff, limit),
+        ).fetchall()
+
+    logs = []
+    for row in rows:
+        try:
+            a = json.loads(row["content"])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        entry = {
+            "ts_utc": row["ts"],
+            "type": a.get("type") or ("drink" if a.get("volume_ml") else "food"),
+            "name": (a.get("food_name_local") or a.get("food_name_en")
+                     or a.get("drink_name_local") or a.get("drink_name_en") or "?"),
+        }
+        if a.get("volume_ml"):
+            entry["ml"] = round(float(a["volume_ml"]))
+        if a.get("calories_kcal"):
+            entry["kcal"] = round(float(a["calories_kcal"]))
+        if a.get("times"):
+            entry["times"] = a["times"]
+        logs.append(entry)
+    return logs
 
 
 def _get_goals(user_id: str) -> dict:
@@ -272,6 +316,14 @@ def _build_context_message(user_id: str) -> str:
     if sleep:
         parts.append(f"Recent sleep detail: {json.dumps(sleep, separators=(',', ':'))}")
 
+    # Recent food/drink logs so follow-ups about "the last log" have context
+    food_logs = _get_recent_food_logs(user_id)
+    if food_logs:
+        parts.append(
+            "Recent food/drink logs (newest first, ts in UTC): "
+            f"{json.dumps(food_logs, separators=(',', ':'), ensure_ascii=False)}"
+        )
+
     if goals:
         parts.append(f"User goals: {json.dumps(goals, separators=(',', ':'))}")
     if memory:
@@ -361,10 +413,13 @@ def handle_message(user_id: str, user_text: str) -> str:
     # success itself).
     for kind, analysis in chat_logs:
         try:
-            from coach.food import log_chat_entry
-            status = log_chat_entry(user_id, kind, analysis)
+            from coach.food import log_chat_entry, adjust_last_log
+            if kind == "adjust":
+                status = adjust_last_log(user_id, analysis)
+            else:
+                status = log_chat_entry(user_id, kind, analysis)
         except Exception:
-            log.exception("failed to log chat-described %s", kind)
+            log.exception("failed to process chat %s directive", kind)
             status = "⚠️"
         if status:
             reply = reply + "\n\n" + status
@@ -418,7 +473,7 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
     [LOG_FOOD/LOG_DRINK: {...}] directives.
 
     Returns (cleaned_text, plan_request_or_None, delete_kind_or_None, logs)
-    where logs is a list of ("food"|"drink", analysis_dict_or_None) — None
+    where logs is a list of ("food"|"drink"|"adjust", payload_dict_or_None) — None
     marks a directive whose JSON didn't parse, so the caller can surface a
     not-saved warning instead of silently dropping it.
     Memory directives are saved immediately; the rest are returned for the
@@ -462,6 +517,8 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             _parse_log("food", stripped[10:-1].strip())
         elif stripped.startswith("[LOG_DRINK:") and stripped.endswith("]"):
             _parse_log("drink", stripped[11:-1].strip())
+        elif stripped.startswith("[ADJUST_LAST:") and stripped.endswith("]"):
+            _parse_log("adjust", stripped[13:-1].strip())
         else:
             clean_lines.append(line)
 

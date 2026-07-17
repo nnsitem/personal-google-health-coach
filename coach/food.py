@@ -389,6 +389,97 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> str:
     return labels["synced_food"] if synced else labels["not_synced"]
 
 
+def adjust_last_log(user_id: str, params: dict | None) -> str:
+    """Rescale the user's most recent food/drink log ("I actually had 4 of
+    those", "กินไปแล้ว 4 รอบ", "only drank half").
+
+    params: {"kind": "food"|"drink" (optional), "times": N} where times is the
+    TOTAL multiple of the originally logged amount. Deletes the original
+    Google Health point(s), re-logs the scaled totals anchored at the ORIGINAL
+    log time, and updates the stored insights row in place (so history and
+    weekly reports don't double-count). Returns a localized status line.
+    """
+    db.init_db()
+    labels = LABELS.get(_lang_code(_get_language(user_id)), LABELS["en"])
+
+    times = _num((params or {}).get("times"))
+    if not isinstance(params, dict) or times <= 0:
+        return labels["not_synced"]
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT rowid, ts, content FROM insights "
+            "WHERE user_id = ? AND kind = 'food_log' ORDER BY ts DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return labels["no_recent_log"]
+
+    try:
+        original = json.loads(row["content"])
+    except (json.JSONDecodeError, ValueError):
+        return labels["no_recent_log"]
+
+    kind = str(params.get("kind") or original.get("type") or "food").lower()
+    kind = "drink" if kind == "drink" else "food"
+
+    scaled = dict(original)
+    for field in ("calories_kcal", "protein_g", "total_carbohydrate_g",
+                  "total_fat_g", "volume_ml", "container_count"):
+        if original.get(field) is not None:
+            scaled[field] = round(_num(original.get(field)) * times, 1)
+    scaled["times"] = times
+
+    # Re-log anchored at the ORIGINAL log time (insights.ts is UTC), so the
+    # entry doesn't jump to "now" on the Google Health timeline.
+    try:
+        ts_utc = datetime.strptime(row["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        local = ts_utc.astimezone(db.user_tz(db.get_user(user_id)))
+        scaled["date"] = local.date().isoformat()
+        scaled["time"] = local.strftime("%H:%M")
+    except (ValueError, TypeError):
+        pass
+
+    was_synced = bool(original.get("synced_to_health"))
+
+    if kind == "drink":
+        # Refuse to re-log if the original can't be removed — double-counting
+        # is worse than a failed adjustment.
+        if was_synced and delete_last_log(user_id, "drink") is None:
+            return labels["not_synced"]
+        # A caloric drink also wrote a nutrition twin at the same moment;
+        # remove it too before re-logging (best-effort — it is the newest
+        # nutrition point unless something was logged in between).
+        if was_synced and _num(original.get("calories_kcal")) > 10:
+            delete_last_log(user_id, "food")
+        synced = log_hydration_to_health(user_id, scaled)
+        if synced and _num(scaled.get("calories_kcal")) > 10:
+            log_food_to_health(user_id, {
+                "food_name_en": scaled.get("drink_name_en")
+                                or scaled.get("drink_name_local") or "drink",
+                "calories_kcal": scaled.get("calories_kcal", 0),
+                "protein_g": scaled.get("protein_g", 0),
+                "total_carbohydrate_g": scaled.get("total_carbohydrate_g", 0),
+                "total_fat_g": scaled.get("total_fat_g", 0),
+                "meal_type": scaled.get("meal_type"),
+                "time": scaled.get("time"),
+                "date": scaled.get("date"),
+            })
+        ok_label = labels["synced_drink"]
+    else:
+        if was_synced and delete_last_log(user_id, "food") is None:
+            return labels["not_synced"]
+        synced = log_food_to_health(user_id, scaled)
+        ok_label = labels["synced_food"]
+
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE insights SET content = ? WHERE rowid = ?",
+            (json.dumps({**scaled, "synced_to_health": synced}), row["rowid"]),
+        )
+    return ok_label if synced else labels["not_synced"]
+
+
 def delete_last_log(user_id: str, kind: str = "food") -> str | None:
     """Delete the most recent nutrition-log or hydration-log entry from Google Health.
 
@@ -461,6 +552,7 @@ LABELS = {
         "low_conf": "(Estimate may be off — try a clearer photo for better accuracy)",
         "empty_drink": "🥤 This looks like an empty container, so I didn't log any hydration. Send a photo with a drink in it and I'll track it!",
         "empty_food": "🍽️ I couldn't estimate a real portion here, so nothing was logged. Try a clearer photo of the food.",
+        "no_recent_log": "🤔 I couldn't find a recent log to adjust.",
         "ai_busy": "⏳ The AI service is very busy right now, so I couldn't analyze your photo. Please try sending it again in a few minutes!",
         "quota_exhausted": "⛔ Your Gemini AI key has used up its free daily quota, so I can't analyze photos for now. It resets at midnight US Pacific time (~2pm Thailand time).",
     },
@@ -478,6 +570,7 @@ LABELS = {
         "low_conf": "(ค่าประมาณอาจคลาดเคลื่อน ลองถ่ายชัด ๆ อีกครั้ง)",
         "empty_drink": "🥤 ดูเหมือนแก้ว/ขวดจะว่างเปล่า ผมเลยยังไม่ได้บันทึกนะครับ ถ้ามีน้ำอยู่ในภาพ ส่งมาใหม่ได้เลยครับ",
         "empty_food": "🍽️ ผมประเมินปริมาณอาหารไม่ได้ เลยยังไม่บันทึกครับ ลองถ่ายอาหารให้ชัดขึ้นอีกนิดนะครับ",
+        "no_recent_log": "🤔 ผมไม่พบรายการที่เพิ่งบันทึกไว้ให้ปรับครับ",
         "ai_busy": "⏳ ตอนนี้ระบบ AI มีผู้ใช้งานเยอะมาก ผมเลยยังวิเคราะห์รูปไม่ได้ครับ อีกสักครู่ลองส่งรูปมาใหม่นะครับ",
         "quota_exhausted": "⛔ คีย์ Gemini ของคุณใช้โควต้าฟรีของวันนี้หมดแล้ว ผมเลยวิเคราะห์รูปไม่ได้ชั่วคราวครับ โควต้าจะรีเซ็ตเที่ยงคืนเวลาแปซิฟิก (ราวบ่าย 2 เวลาไทย)",
     },
