@@ -9,7 +9,8 @@ manually-populated nutrient payload.
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 
 from google import genai
 
@@ -87,6 +88,66 @@ def _infer_meal_type(now: datetime) -> str:
     if 17 <= h < 21:
         return "DINNER"        # 17:00–21:00
     return "SNACK"             # late night / early morning
+
+
+_MEAL_TYPES = {"BREAKFAST", "LUNCH", "DINNER", "SNACK"}
+
+# Typical local time for a named meal — used to place a chat log ("log my
+# breakfast: ...") at a sensible spot on the Google Health timeline when the
+# user named the meal but not a clock time.
+_MEAL_DEFAULT_TIME = {
+    "BREAKFAST": (8, 0),
+    "LUNCH": (12, 30),
+    "SNACK": (15, 30),
+    "DINNER": (19, 0),
+}
+
+
+def _explicit_meal_type(analysis: dict) -> str | None:
+    """The user-stated meal type, if the analysis carries a valid one."""
+    mt = str(analysis.get("meal_type") or "").strip().upper()
+    return mt if mt in _MEAL_TYPES else None
+
+
+def _num(x) -> float:
+    """Lenient numeric coercion for model-produced values ('450', 450, None)."""
+    try:
+        return float(x or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _resolve_log_time(analysis: dict, tz) -> datetime:
+    """When the log happened, in the user's local time.
+
+    Priority: an explicit "time" (HH:MM, optionally with "date" YYYY-MM-DD for
+    a previous day) → the named meal's typical hour → now. Never in the
+    future: a claimed time ahead of the clock falls back to now, which also
+    keeps photo logs (no time/meal hints) exactly as before.
+    """
+    now = datetime.now(tz)
+    dt = None
+
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(analysis.get("time") or "").strip())
+    if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
+        base = now.date()
+        try:
+            d = str(analysis.get("date") or "").strip()
+            if d:
+                base = date.fromisoformat(d)
+        except ValueError:
+            pass
+        dt = datetime(base.year, base.month, base.day,
+                      int(m.group(1)), int(m.group(2)), tzinfo=tz)
+    else:
+        meal_type = _explicit_meal_type(analysis)
+        if meal_type:
+            h, minute = _MEAL_DEFAULT_TIME[meal_type]
+            dt = now.replace(hour=h, minute=minute, second=0, microsecond=0)
+
+    if dt is None or dt > now:
+        return now
+    return dt
 
 
 def _get_language(user_id: str) -> str:
@@ -168,10 +229,10 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
 
     Logged as anonymous food (manual nutrients + energy + macros).
     """
-    # Always derive meal type from the actual log time.
-    meal_type = _infer_meal_type(now)
+    # A meal type the user stated wins; otherwise derive it from the log time.
+    meal_type = _explicit_meal_type(analysis) or _infer_meal_type(now)
 
-    interval, _ = _interval_now(now.tzinfo)
+    interval = _interval_at(now)
 
     calories = float(analysis.get("calories_kcal") or 0)
     protein = float(analysis.get("protein_g") or 0)
@@ -206,26 +267,23 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
     }
 
 
-def _interval_now(tz=None) -> tuple[dict, datetime]:
-    """Build a 1-minute interval ending now, with the given TZ's UTC offset."""
-    from datetime import timedelta
-    now = datetime.now(tz or TZ)
-    end_dt = now.astimezone(timezone.utc)
+def _interval_at(dt: datetime) -> dict:
+    """Build a 1-minute interval ending at `dt` (tz-aware), with its UTC offset."""
+    end_dt = dt.astimezone(timezone.utc)
     start_dt = end_dt - timedelta(minutes=1)
-    offset_seconds = int(now.utcoffset().total_seconds()) if now.utcoffset() else 0
+    offset_seconds = int(dt.utcoffset().total_seconds()) if dt.utcoffset() else 0
     utc_offset = f"{offset_seconds}s"
-    interval = {
+    return {
         "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "startUtcOffset": utc_offset,
         "endUtcOffset": utc_offset,
     }
-    return interval, now
 
 
 def _build_hydration_datapoint(analysis: dict, tz=None) -> dict:
     """Build a Google Health HydrationLog DataPoint (volume in milliliters)."""
-    interval, _ = _interval_now(tz)
+    interval = _interval_at(_resolve_log_time(analysis, tz or TZ))
     volume_ml = float(analysis.get("volume_ml") or 0)
     return {
         "dataSource": {"recordingMethod": "MANUAL"},
@@ -241,8 +299,9 @@ def log_food_to_health(user_id: str, analysis: dict) -> bool:
 
     Returns True on success, False on failure.
     """
-    # Meal type (breakfast/lunch/...) follows the USER's local clock.
-    now = datetime.now(db.user_tz(db.get_user(user_id)))
+    # Log time follows the USER's local clock, unless the analysis carries an
+    # explicit time or a named meal (chat logs: "log my breakfast ...").
+    now = _resolve_log_time(analysis, db.user_tz(db.get_user(user_id)))
     data_point = _build_nutrition_datapoint(analysis, now)
 
     try:
@@ -276,6 +335,58 @@ def _store_food_log(user_id: str, analysis: dict, synced: bool) -> None:
             "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'food_log', ?, ?)",
             (user_id, json.dumps({**analysis, "synced_to_health": synced}), 1),
         )
+
+
+def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> str:
+    """Log a food/drink the user DESCRIBED in chat (no photo).
+
+    `analysis` is the JSON the chat model emitted in a [LOG_FOOD]/[LOG_DRINK]
+    directive — same shape as the vision output, plus optional meal_type /
+    time / date fields. Returns a short localized status line to append to
+    the coach's reply, so the visible confirmation reflects whether the
+    Google Health write actually happened.
+    """
+    db.init_db()
+    labels = LABELS.get(_lang_code(_get_language(user_id)), LABELS["en"])
+
+    if not isinstance(analysis, dict):
+        return labels["not_synced"]
+
+    # The model writes these as JSON numbers, but be lenient ("450" etc.)
+    for field in ("calories_kcal", "protein_g", "total_carbohydrate_g",
+                  "total_fat_g", "volume_ml", "container_count"):
+        if field in analysis:
+            analysis[field] = _num(analysis[field])
+
+    if kind == "drink":
+        if round(analysis.get("volume_ml") or 0) <= 0:
+            return labels["empty_drink"]
+        synced_hydration = log_hydration_to_health(user_id, analysis)
+        # Caloric drinks also count as nutrition, mirroring the photo flow.
+        synced_nutrition = False
+        if round(analysis.get("calories_kcal") or 0) > 10:
+            synced_nutrition = log_food_to_health(user_id, {
+                "food_name_en": analysis.get("drink_name_en")
+                                or analysis.get("drink_name_local") or "drink",
+                "calories_kcal": analysis.get("calories_kcal", 0),
+                "protein_g": analysis.get("protein_g", 0),
+                "total_carbohydrate_g": analysis.get("total_carbohydrate_g", 0),
+                "total_fat_g": analysis.get("total_fat_g", 0),
+                "meal_type": analysis.get("meal_type"),
+                "time": analysis.get("time"),
+                "date": analysis.get("date"),
+            })
+        _store_food_log(user_id, {**analysis, "type": "drink", "source": "chat"},
+                        synced_hydration)
+        if synced_hydration and synced_nutrition:
+            return labels["synced_drink"] + " + " + labels["synced_food"]
+        return labels["synced_drink"] if synced_hydration else labels["not_synced"]
+
+    if round(analysis.get("calories_kcal") or 0) <= 0:
+        return labels["empty_food"]
+    synced = log_food_to_health(user_id, analysis)
+    _store_food_log(user_id, {**analysis, "type": "food", "source": "chat"}, synced)
+    return labels["synced_food"] if synced else labels["not_synced"]
 
 
 def delete_last_log(user_id: str, kind: str = "food") -> str | None:

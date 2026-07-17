@@ -52,6 +52,23 @@ Special abilities (use these directives on their own line at the END of your rep
 - To delete the user's most recent food or drink log when they ask (e.g. "delete that", "remove my last meal", "ลบรายการล่าสุด"):
   [DELETE_LAST: food] for a meal, or [DELETE_LAST: drink] for a drink.
   After emitting this, confirm you're removing it.
+- To log food or drinks the user describes in words (e.g. "log: grilled pork 3 skewers with sticky rice",
+  "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว"):
+  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
+  [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
+  Rules for these two directives:
+  - Estimate realistic nutrition/volume from the description and stated portions
+    (a glass ≈ 250 ml, a bottle ≈ 500 ml). volume_ml is the TOTAL across containers.
+  - Valid single-line JSON only; every number a plain number, never a range or text.
+  - meal_type: "BREAKFAST" | "LUNCH" | "DINNER" | "SNACK" — set ONLY when the user
+    says which meal it was (breakfast/มื้อเช้า, lunch/มื้อเที่ยง, dinner/มื้อเย็น, snack/ของว่าง); else null.
+  - time: "HH:MM" (24h, user's local time) ONLY when they say when they had it; you may
+    add "date": "YYYY-MM-DD" for a previous day (e.g. "เมื่อวาน"). Otherwise null (= now).
+  - Emit one directive per item if they describe several distinct meals/drinks with
+    different times; combine dishes eaten together into ONE entry.
+  - Only log when the user asks to log/record something — not when food is merely mentioned.
+  - In your visible reply, confirm the item with the estimated calories (or volume) and
+    the meal slot if given. Do NOT say it was saved — the system appends the real save status.
 """
 
 
@@ -321,8 +338,8 @@ def handle_message(user_id: str, user_text: str) -> str:
         log.exception("Gemini call failed")
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
 
-    # Extract and process directives (memory + plan creation + delete)
-    reply, plan_request, delete_kind = _process_directives(user_id, reply)
+    # Extract and process directives (memory + plan creation + delete + logs)
+    reply, plan_request, delete_kind, chat_logs = _process_directives(user_id, reply)
 
     # If the coach requested a plan, create it and append a formatted summary
     if plan_request:
@@ -338,6 +355,19 @@ def handle_message(user_id: str, user_text: str) -> str:
         except Exception:
             log.exception("failed to create workout plan")
             reply = reply + "\n\n(ขออภัย ยังสร้างแผนไม่สำเร็จ ลองใหม่อีกครั้งนะครับ)"
+
+    # If the coach logged food/drinks described in chat, write them to Google
+    # Health and append the REAL save status (the model is told not to claim
+    # success itself).
+    for kind, analysis in chat_logs:
+        try:
+            from coach.food import log_chat_entry
+            status = log_chat_entry(user_id, kind, analysis)
+        except Exception:
+            log.exception("failed to log chat-described %s", kind)
+            status = "⚠️"
+        if status:
+            reply = reply + "\n\n" + status
 
     # If the coach requested a deletion, remove the last log
     if delete_kind:
@@ -383,17 +413,30 @@ def _format_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
-def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None]:
-    """Extract [MEMORY: ...], [CREATE_PLAN: ...] and [DELETE_LAST: ...] directives.
+def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None, list]:
+    """Extract [MEMORY: ...], [CREATE_PLAN: ...], [DELETE_LAST: ...] and
+    [LOG_FOOD/LOG_DRINK: {...}] directives.
 
-    Returns (cleaned_text, plan_request_or_None, delete_kind_or_None).
-    Memory directives are saved immediately; plan/delete requests are returned
-    for the caller to handle (slower operations).
+    Returns (cleaned_text, plan_request_or_None, delete_kind_or_None, logs)
+    where logs is a list of ("food"|"drink", analysis_dict_or_None) — None
+    marks a directive whose JSON didn't parse, so the caller can surface a
+    not-saved warning instead of silently dropping it.
+    Memory directives are saved immediately; the rest are returned for the
+    caller to handle (slower operations).
     """
     lines = text.split("\n")
     clean_lines = []
     plan_request = None
     delete_kind = None
+    logs: list[tuple[str, dict | None]] = []
+
+    def _parse_log(kind: str, inner: str) -> None:
+        try:
+            data = json.loads(inner)
+            logs.append((kind, data if isinstance(data, dict) else None))
+        except (json.JSONDecodeError, ValueError):
+            log.warning("unparseable %s directive: %s", kind, inner[:200])
+            logs.append((kind, None))
 
     for line in lines:
         stripped = line.strip()
@@ -415,10 +458,14 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             kind = stripped[13:-1].strip().lower()
             delete_kind = "drink" if "drink" in kind else "food"
             log.info("delete requested: %s", delete_kind)
+        elif stripped.startswith("[LOG_FOOD:") and stripped.endswith("]"):
+            _parse_log("food", stripped[10:-1].strip())
+        elif stripped.startswith("[LOG_DRINK:") and stripped.endswith("]"):
+            _parse_log("drink", stripped[11:-1].strip())
         else:
             clean_lines.append(line)
 
-    return "\n".join(clean_lines).strip(), plan_request, delete_kind
+    return "\n".join(clean_lines).strip(), plan_request, delete_kind, logs
 
 
 if __name__ == "__main__":
