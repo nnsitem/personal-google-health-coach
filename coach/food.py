@@ -487,7 +487,8 @@ def delete_newest_log(user_id: str, kind: str) -> str | None:
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT rowid, content FROM insights "
-            "WHERE user_id = ? AND kind = 'food_log' ORDER BY ts DESC LIMIT 10",
+            "WHERE user_id = ? AND kind = 'food_log' "
+            "ORDER BY ts DESC, rowid DESC LIMIT 10",
             (user_id,),
         ).fetchall()
     for row in rows:
@@ -501,9 +502,12 @@ def delete_newest_log(user_id: str, kind: str) -> str | None:
 
 
 def adjust_last_log(user_id: str, params: dict | None,
-                    insight_rowid: int | None = None) -> str:
+                    insight_rowid: int | None = None) -> tuple[str, int | None]:
     """Rescale a food/drink log ("I actually had 4 of those", "กินไปแล้ว 4
     รอบ", "only drank half").
+
+    Returns (status_line, adjusted_rowid_or_None) — the rowid lets the caller
+    map the confirmation message, so quoting IT adjusts the same log again.
 
     params: {"kind": "food"|"drink" (optional), "times": N} where times is the
     TOTAL multiple of the originally logged amount. insight_rowid pins the
@@ -519,7 +523,7 @@ def adjust_last_log(user_id: str, params: dict | None,
 
     times = _num((params or {}).get("times"))
     if not isinstance(params, dict) or times <= 0:
-        return labels["not_synced"]
+        return labels["not_synced"], None
 
     with db.connect() as conn:
         if insight_rowid is not None:
@@ -531,7 +535,8 @@ def adjust_last_log(user_id: str, params: dict | None,
         else:
             rows = conn.execute(
                 "SELECT rowid, ts, content FROM insights "
-                "WHERE user_id = ? AND kind = 'food_log' ORDER BY ts DESC LIMIT 10",
+                "WHERE user_id = ? AND kind = 'food_log' "
+                "ORDER BY ts DESC, rowid DESC LIMIT 10",
                 (user_id,),
             ).fetchall()
     parsed = []
@@ -541,7 +546,7 @@ def adjust_last_log(user_id: str, params: dict | None,
         except (json.JSONDecodeError, ValueError):
             continue
     if not parsed:
-        return labels["no_recent_log"]
+        return labels["no_recent_log"], None
 
     # Prefer the newest log matching the kind the model asked for ("drank 4x"
     # should never grab a meal), but fall back to the newest of any type.
@@ -577,7 +582,7 @@ def adjust_last_log(user_id: str, params: dict | None,
     # Remove the original Google Health point(s) first — refuse to re-log if
     # they can't be removed (double-counting is worse than a failed adjustment).
     if not _delete_log_points(user_id, original, kind):
-        return labels["not_synced"]
+        return labels["not_synced"], None
 
     new_points: list[str] = []
     if kind == "drink":
@@ -611,7 +616,7 @@ def adjust_last_log(user_id: str, params: dict | None,
             "UPDATE insights SET content = ? WHERE rowid = ?",
             (json.dumps({**scaled, "synced_to_health": synced}), row["rowid"]),
         )
-    return ok_label if synced else labels["not_synced"]
+    return (ok_label if synced else labels["not_synced"]), row["rowid"]
 
 
 def delete_last_log(user_id: str, kind: str = "food") -> str | None:

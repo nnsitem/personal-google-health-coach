@@ -173,7 +173,7 @@ def _get_recent_food_logs(user_id: str, hours: int = 48, limit: int = 8) -> list
         rows = conn.execute(
             "SELECT ts, content FROM insights "
             "WHERE user_id = ? AND kind = 'food_log' AND ts >= ? "
-            "ORDER BY ts DESC LIMIT ?",
+            "ORDER BY ts DESC, rowid DESC LIMIT ?",
             (user_id, cutoff, limit),
         ).fetchall()
 
@@ -362,6 +362,8 @@ def handle_message(user_id: str, user_text: str,
     if quoted_message_id:
         try:
             quoted_log = db.get_log_for_message(user_id, quoted_message_id)
+            log.info("quoted message %s -> log rowid %s", quoted_message_id,
+                     quoted_log["rowid"] if quoted_log else None)
         except Exception:
             log.exception("failed to resolve quoted message %s", quoted_message_id)
 
@@ -392,6 +394,14 @@ def handle_message(user_id: str, user_text: str,
             "(The user's next message is a quote-REPLY to this specific logged "
             "entry — it is the target of any adjustment, NOT the most recent "
             f"log: {quoted_json})"
+        )
+    elif quoted_message_id:
+        conversation_parts.append(
+            "(The user's next message is a quote-REPLY to an earlier message "
+            "that is NOT a tracked log entry (possibly logged before tracking "
+            "existed). If they are asking to adjust or delete a log, do NOT "
+            "guess which one — ask them to confirm which item they mean, "
+            "unless the recent-logs context makes it unambiguous.)"
         )
     conversation_parts.append(f"User: {user_text}")
     conversation_parts.append("\nRespond as the coach in 3-5 sentences maximum. Complete your thought fully — do not leave sentences unfinished. If the user mentions a goal or preference you should remember, end your response with a line like [MEMORY: key = value] and I'll save it.")
@@ -447,10 +457,14 @@ def handle_message(user_id: str, user_text: str,
         try:
             from coach.food import log_chat_entry, adjust_last_log
             if kind == "adjust":
-                status = adjust_last_log(
+                status, adj_rowid = adjust_last_log(
                     user_id, analysis,
                     insight_rowid=quoted_log["rowid"] if quoted_log else None,
                 )
+                # Map the adjustment confirmation too, so quoting IT
+                # re-targets the same log.
+                if adj_rowid is not None:
+                    created_rowids.append(adj_rowid)
             else:
                 status, rowid = log_chat_entry(user_id, kind, analysis)
                 if rowid is not None:

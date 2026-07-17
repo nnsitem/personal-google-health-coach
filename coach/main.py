@@ -244,22 +244,26 @@ def _send_welcome(user_id: str, reply_token: str | None = None) -> None:
 
 
 def _map_sent_log(user_id: str, message_ids: list[str], rowids: list[int]) -> None:
-    """Associate the sent log-confirmation message with the log(s) it confirms,
-    so a later quote-reply can target that exact log. Best-effort."""
+    """Associate LINE messages with the log(s) they concern, so a later
+    quote-reply can target that exact log. Covers BOTH directions: the coach's
+    confirmation message ids AND the user's own inbound message (photo/text)
+    that created the log — users quote either one. Best-effort."""
     if not message_ids or not rowids:
         return
     try:
         # One confirmation message may cover several logs; a quote-reply to it
         # most plausibly means the newest one.
-        db.map_log_message(message_ids[0], user_id, rowids[-1])
+        for mid in message_ids:
+            db.map_log_message(mid, user_id, rowids[-1])
     except Exception:
         log.exception("failed to map log message for %s", user_id)
 
 
 def _process_text_message(user_id: str, text: str, reply_token: str | None = None,
-                          quoted_message_id: str | None = None) -> None:
+                          quoted_message_id: str | None = None,
+                          inbound_message_id: str | None = None) -> None:
     """Handle a text message in the background."""
-    log.info("LINE message from %s: %s", user_id, text)
+    log.info("LINE message from %s: %s (quoted=%s)", user_id, text, quoted_message_id)
 
     # Check for onboarding commands before passing to chat agent
     lower = text.strip().lower()
@@ -311,6 +315,8 @@ def _process_text_message(user_id: str, text: str, reply_token: str | None = Non
     try:
         reply, log_rowids = handle_message(user_id, text, quoted_message_id=quoted_message_id)
         sent_ids = _send(user_id, reply, reply_token)
+        if inbound_message_id:
+            sent_ids = sent_ids + [inbound_message_id]
         _map_sent_log(user_id, sent_ids, log_rowids)
         log.info("replied via LINE: %s", reply[:80])
     except Exception:
@@ -411,7 +417,10 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
         mime = _detect_image_mime(image_bytes)
         reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
         sent_ids = _send(user_id, reply, reply_token)
-        _map_sent_log(user_id, sent_ids, [log_rowid] if log_rowid is not None else [])
+        # Map the coach's confirmation AND the user's own photo message — a
+        # quote-reply to either should target this log.
+        _map_sent_log(user_id, sent_ids + [message_id],
+                      [log_rowid] if log_rowid is not None else [])
         log.info("photo processed: %s", reply[:80])
     except Exception:
         log.exception("failed to handle photo")
@@ -463,7 +472,8 @@ async def line_webhook(request: Request, background_tasks: BackgroundTasks):
         # Process in the background so we return 200 to LINE immediately
         if msg_type == "text":
             background_tasks.add_task(_process_text_message, user_id, msg["text"],
-                                      reply_token, msg.get("quotedMessageId"))
+                                      reply_token, msg.get("quotedMessageId"),
+                                      msg.get("id"))
         elif msg_type == "image":
             background_tasks.add_task(_process_image_message, user_id, msg.get("id", ""), reply_token)
 
