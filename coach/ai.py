@@ -101,6 +101,7 @@ def build_daily_snapshot(user_id: str) -> dict:
             "start": row["start"],
             "end": row["end"],
             "duration_hours": duration_info["total_hours"],
+            "in_bed_hours": duration_info["in_bed_hours"],
             "deep_min": duration_info["deep_min"],
             "light_min": duration_info["light_min"],
             "rem_min": duration_info["rem_min"],
@@ -200,9 +201,12 @@ def _summarize_sleep_stages(stages: list[dict]) -> dict:
         except (ValueError, TypeError):
             continue
 
-    total_min = sum(totals.values())
+    in_bed_min = sum(totals.values())
     return {
-        "total_hours": round(total_min / 60, 1),
+        # total_hours = time ASLEEP (awake excluded), matching the number the
+        # Google Health app shows the user.
+        "total_hours": round((in_bed_min - totals["AWAKE"]) / 60, 1),
+        "in_bed_hours": round(in_bed_min / 60, 1),
         "deep_min": round(totals["DEEP"]),
         "light_min": round(totals["LIGHT"]),
         "rem_min": round(totals["REM"]),

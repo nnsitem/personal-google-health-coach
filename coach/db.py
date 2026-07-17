@@ -585,6 +585,14 @@ def upsert_metric(user_id: str, day: str, hour: int | None, data_type: str, valu
 
 def upsert_sleep_session(user_id: str, start: str, end: str, stages, efficiency=None, score=None) -> None:
     with connect() as conn:
+        # A session that grows as the tracker syncs keeps its start but moves
+        # its end — the (start, end) PK would then keep the stale shorter row
+        # as a duplicate night. Remove any stored session overlapping this
+        # interval first (ISO-8601 UTC strings compare lexicographically).
+        conn.execute(
+            "DELETE FROM sleep_sessions WHERE user_id = ? AND start < ? AND end > ?",
+            (user_id, end, start),
+        )
         conn.execute(
             """
             INSERT INTO sleep_sessions (user_id, start, end, stages_json, efficiency, score)

@@ -146,7 +146,8 @@ def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
             except (ValueError, KeyError):
                 continue
 
-        total_min = sum(totals.values())
+        in_bed_min = sum(totals.values())
+        asleep_min = in_bed_min - totals["AWAKE"]
         start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(TZ)
         end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(TZ)
 
@@ -154,7 +155,10 @@ def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
             "date": start_local.strftime("%Y-%m-%d"),
             "bedtime": start_local.strftime("%H:%M"),
             "wake": end_local.strftime("%H:%M"),
-            "total_hours": round(total_min / 60, 1),
+            # asleep_hours matches the Google Health app's headline number
+            # (time asleep, awake time excluded)
+            "asleep_hours": round(asleep_min / 60, 1),
+            "in_bed_hours": round(in_bed_min / 60, 1),
             "deep_min": round(totals["DEEP"]),
             "rem_min": round(totals["REM"]),
             "light_min": round(totals["LIGHT"]),

@@ -110,34 +110,66 @@ def _trend(this_week: float | None, last_week: float | None) -> str | None:
     return f"{'up' if pct > 0 else 'down'} {abs(round(pct))}% vs last week"
 
 
+def _asleep_minutes(stages: list[dict]) -> float:
+    """Minutes actually asleep (DEEP/LIGHT/REM). AWAKE time is EXCLUDED —
+    the Google Health app's headline number is time asleep, not time in bed,
+    and the coach must quote the same figure the user sees in the app."""
+    total = 0.0
+    for s in stages:
+        try:
+            st = datetime.fromisoformat(s["startTime"].replace("Z", "+00:00"))
+            en = datetime.fromisoformat(s["endTime"].replace("Z", "+00:00"))
+            if s.get("type") in ("DEEP", "LIGHT", "REM"):
+                total += (en - st).total_seconds() / 60
+        except (ValueError, KeyError, TypeError):
+            continue
+    return total
+
+
 def _sleep_series(user_id: str, days: int) -> dict[str, float]:
-    """Return {date: total_sleep_hours} for the last `days` days."""
+    """Return {wake_date: asleep_hours of the MAIN sleep period ending that date}.
+
+    - Sessions separated by ≤3h are merged into one period, so an interrupted
+      night isn't reported as only its final segment.
+    - The LONGEST period of the date wins: an afternoon nap ends on the same
+      local date as the night and previously OVERWROTE it (the coach then
+      reported the nap's 3.5h while the app showed the night's 6h).
+    """
     today = datetime.now(TZ).date()
     cutoff = (today - timedelta(days=days)).isoformat()
-    out: dict[str, float] = {}
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT start, end, stages_json FROM sleep_sessions WHERE user_id = ? AND start >= ? ORDER BY start",
             (user_id, cutoff),
         ).fetchall()
+
+    sessions = []
     for row in rows:
+        try:
+            st = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
+            en = datetime.fromisoformat(row["end"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
         stages = json.loads(row["stages_json"]) if row["stages_json"] else []
-        total_min = 0.0
-        for s in stages:
-            try:
-                st = datetime.fromisoformat(s["startTime"].replace("Z", "+00:00"))
-                en = datetime.fromisoformat(s["endTime"].replace("Z", "+00:00"))
-                if s.get("type") in ("DEEP", "LIGHT", "REM", "AWAKE"):
-                    total_min += (en - st).total_seconds() / 60
-            except (ValueError, KeyError):
-                continue
-        if total_min > 0:
-            # Attribute the sleep to its wake-up (end) local date
-            try:
-                end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(TZ)
-                out[end_local.date().isoformat()] = round(total_min / 60, 1)
-            except (ValueError, KeyError):
-                continue
+        asleep = _asleep_minutes(stages)
+        if asleep > 0:
+            sessions.append((st, en, asleep))
+
+    # Merge near-adjacent sessions (gap ≤ 3h) into one sleep period
+    periods: list[tuple] = []
+    for st, en, asleep in sessions:
+        if periods and (st - periods[-1][1]).total_seconds() <= 3 * 3600:
+            pst, pen, pasleep = periods[-1]
+            periods[-1] = (pst, max(pen, en), pasleep + asleep)
+        else:
+            periods.append((st, en, asleep))
+
+    out: dict[str, float] = {}
+    for _, en, asleep in periods:
+        d = en.astimezone(TZ).date().isoformat()
+        hours = round(asleep / 60, 1)
+        if hours > out.get(d, 0.0):
+            out[d] = hours
     return out
 
 
