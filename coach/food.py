@@ -478,6 +478,80 @@ def delete_log(user_id: str, insight_rowid: int) -> str | None:
     return (content.get("food_name_local") or content.get("food_name_en") or "meal")
 
 
+def delete_today_logs(user_id: str, kind: str = "all") -> str:
+    """Delete ALL nutrition/hydration entries for the user's current local
+    date — every Google Health point with today's civil date (including ones
+    logged before local tracking existed) plus the local history rows.
+
+    kind: 'food' | 'drink' | 'all'. Returns a localized status line.
+    """
+    db.init_db()
+    labels = LABELS.get(_lang_code(_get_language(user_id)), LABELS["en"])
+
+    tz = db.user_tz(db.get_user(user_id))
+    now_local = datetime.now(tz)
+    start = now_local.date().isoformat()
+    end = (now_local.date() + timedelta(days=1)).isoformat()
+
+    data_types = []
+    if kind in ("food", "all"):
+        data_types.append("nutrition-log")
+    if kind in ("drink", "all"):
+        data_types.append("hydration-log")
+
+    counts = {"nutrition-log": 0, "hydration-log": 0}
+    try:
+        client = client_for_user(user_id)
+        for data_type in data_types:
+            field = data_type.replace("-", "_")
+            filter_str = (
+                f'{field}.interval.civil_start_time >= "{start}" '
+                f'AND {field}.interval.civil_start_time < "{end}"'
+            )
+            points = client.list_points(data_type, filter_str)
+            names = [p["name"] for p in points if p.get("name")]
+            if names:
+                client.batch_delete_data_points(data_type, names)
+            counts[data_type] = len(names)
+    except HealthAPIError as e:
+        # Don't clear local history if Google Health still holds the points —
+        # the two stores must not diverge.
+        log.error("failed to clear today's %s logs: %s", kind, e)
+        return labels["delete_failed"]
+
+    # Clear matching local history rows for today (user-local midnight, UTC ts)
+    cutoff = (now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+              .astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+    removed_local = 0
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT rowid, content FROM insights "
+            "WHERE user_id = ? AND kind = 'food_log' AND ts >= ?",
+            (user_id, cutoff),
+        ).fetchall()
+        for row in rows:
+            try:
+                row_kind = "drink" if json.loads(row["content"]).get("type") == "drink" else "food"
+            except (json.JSONDecodeError, ValueError):
+                row_kind = "food"
+            if kind != "all" and row_kind != kind:
+                continue
+            conn.execute("DELETE FROM insights WHERE rowid = ?", (row["rowid"],))
+            conn.execute("DELETE FROM log_messages WHERE insight_rowid = ?", (row["rowid"],))
+            removed_local += 1
+
+    total = counts["nutrition-log"] + counts["hydration-log"]
+    if total == 0 and removed_local == 0:
+        return labels["nothing_today"]
+    parts = []
+    if kind in ("food", "all"):
+        parts.append(labels["deleted_meals"].format(n=counts["nutrition-log"]))
+    if kind in ("drink", "all"):
+        parts.append(labels["deleted_drinks"].format(n=counts["hydration-log"]))
+    log.info("cleared today's logs for %s: %s (local rows: %d)", user_id, counts, removed_local)
+    return "🗑️ " + labels["deleted_today"] + " " + " / ".join(parts)
+
+
 def delete_newest_log(user_id: str, kind: str) -> str | None:
     """Delete the newest stored log of the given kind ('food'|'drink').
 
@@ -692,6 +766,11 @@ LABELS = {
         "empty_drink": "🥤 This looks like an empty container, so I didn't log any hydration. Send a photo with a drink in it and I'll track it!",
         "empty_food": "🍽️ I couldn't estimate a real portion here, so nothing was logged. Try a clearer photo of the food.",
         "no_recent_log": "🤔 I couldn't find a recent log to adjust.",
+        "delete_failed": "⚠️ Couldn't delete from Google Health — please try again.",
+        "nothing_today": "🤷 No logs found for today.",
+        "deleted_today": "Cleared today's logs:",
+        "deleted_meals": "{n} meal(s)",
+        "deleted_drinks": "{n} drink(s)",
         "ai_busy": "⏳ The AI service is very busy right now, so I couldn't analyze your photo. Please try sending it again in a few minutes!",
         "quota_exhausted": "⛔ Your Gemini AI key has used up its free daily quota, so I can't analyze photos for now. It resets at midnight US Pacific time (~2pm Thailand time).",
     },
@@ -710,6 +789,11 @@ LABELS = {
         "empty_drink": "🥤 ดูเหมือนแก้ว/ขวดจะว่างเปล่า ผมเลยยังไม่ได้บันทึกนะครับ ถ้ามีน้ำอยู่ในภาพ ส่งมาใหม่ได้เลยครับ",
         "empty_food": "🍽️ ผมประเมินปริมาณอาหารไม่ได้ เลยยังไม่บันทึกครับ ลองถ่ายอาหารให้ชัดขึ้นอีกนิดนะครับ",
         "no_recent_log": "🤔 ผมไม่พบรายการที่เพิ่งบันทึกไว้ให้ปรับครับ",
+        "delete_failed": "⚠️ ยังลบจาก Google Health ไม่สำเร็จครับ ลองใหม่อีกครั้งนะครับ",
+        "nothing_today": "🤷 วันนี้ยังไม่มีรายการที่บันทึกไว้ครับ",
+        "deleted_today": "ลบรายการของวันนี้แล้ว:",
+        "deleted_meals": "อาหาร {n} รายการ",
+        "deleted_drinks": "เครื่องดื่ม {n} รายการ",
         "ai_busy": "⏳ ตอนนี้ระบบ AI มีผู้ใช้งานเยอะมาก ผมเลยยังวิเคราะห์รูปไม่ได้ครับ อีกสักครู่ลองส่งรูปมาใหม่นะครับ",
         "quota_exhausted": "⛔ คีย์ Gemini ของคุณใช้โควต้าฟรีของวันนี้หมดแล้ว ผมเลยวิเคราะห์รูปไม่ได้ชั่วคราวครับ โควต้าจะรีเซ็ตเที่ยงคืนเวลาแปซิฟิก (ราวบ่าย 2 เวลาไทย)",
     },

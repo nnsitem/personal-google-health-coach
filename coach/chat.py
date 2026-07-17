@@ -55,6 +55,13 @@ Special abilities (use these directives on their own line at the END of your rep
   If the user is quote-replying to a specific logged entry (shown in the context), the system
   deletes EXACTLY that entry — use its type as the kind. Otherwise the newest log of that kind
   is deleted. After emitting this, confirm which item you're removing.
+- To delete ALL of today's logs when the user asks to clear the whole day (e.g.
+  "ลบรายการอาหารวันนี้ทั้งหมด", "clear all my logs today", "delete today's hydration"):
+  [DELETE_TODAY: all] — or [DELETE_TODAY: food] / [DELETE_TODAY: drink] for one kind only.
+  This is DESTRUCTIVE and irreversible: do NOT emit it on the first request. First ask the
+  user to confirm (mention what will be wiped, e.g. "จะลบรายการอาหารและเครื่องดื่มของวันนี้ทั้งหมด
+  ยืนยันไหมครับ?"), and emit the directive only after they confirm in their next message.
+  The system appends the result of the deletion.
 - To log food or drinks the user describes in words (e.g. "log: grilled pork 3 skewers with sticky rice",
   "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว"):
   [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
@@ -436,7 +443,7 @@ def handle_message(user_id: str, user_text: str,
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
 
     # Extract and process directives (memory + plan creation + delete + logs)
-    reply, plan_request, delete_kind, chat_logs = _process_directives(user_id, reply)
+    reply, plan_request, delete_kind, chat_logs, delete_today = _process_directives(user_id, reply)
 
     # If the coach requested a plan, create it and append a formatted summary
     if plan_request:
@@ -495,6 +502,16 @@ def handle_message(user_id: str, user_text: str,
         except Exception:
             log.exception("failed to delete log")
 
+    # If the coach requested clearing today's logs (already user-confirmed
+    # per the prompt), sweep the whole local day
+    if delete_today:
+        try:
+            from coach.food import delete_today_logs
+            reply = reply + "\n\n" + delete_today_logs(user_id, delete_today)
+        except Exception:
+            log.exception("failed to delete today's logs")
+            reply = reply + "\n\n⚠️"
+
     # Store coach reply
     _save_chat_message(user_id, "coach", reply)
 
@@ -531,17 +548,18 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
     """Extract [MEMORY: ...], [CREATE_PLAN: ...], [DELETE_LAST: ...] and
     [LOG_FOOD/LOG_DRINK: {...}] directives.
 
-    Returns (cleaned_text, plan_request_or_None, delete_kind_or_None, logs)
-    where logs is a list of ("food"|"drink"|"adjust", payload_dict_or_None) — None
-    marks a directive whose JSON didn't parse, so the caller can surface a
-    not-saved warning instead of silently dropping it.
-    Memory directives are saved immediately; the rest are returned for the
-    caller to handle (slower operations).
+    Returns (cleaned_text, plan_request_or_None, delete_kind_or_None, logs,
+    delete_today_or_None) where logs is a list of ("food"|"drink"|"adjust",
+    payload_dict_or_None) — None marks a directive whose JSON didn't parse,
+    so the caller can surface a not-saved warning instead of silently
+    dropping it. Memory directives are saved immediately; the rest are
+    returned for the caller to handle (slower operations).
     """
     lines = text.split("\n")
     clean_lines = []
     plan_request = None
     delete_kind = None
+    delete_today = None
     logs: list[tuple[str, dict | None]] = []
 
     def _parse_log(kind: str, inner: str) -> None:
@@ -578,10 +596,19 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             _parse_log("drink", stripped[11:-1].strip())
         elif stripped.startswith("[ADJUST_LAST:") and stripped.endswith("]"):
             _parse_log("adjust", stripped[13:-1].strip())
+        elif stripped.startswith("[DELETE_TODAY:") and stripped.endswith("]"):
+            val = stripped[14:-1].strip().lower()
+            if "drink" in val or "hydration" in val or "water" in val:
+                delete_today = "drink"
+            elif "food" in val or "meal" in val or "nutrition" in val:
+                delete_today = "food"
+            else:
+                delete_today = "all"
+            log.info("delete-today requested: %s", delete_today)
         else:
             clean_lines.append(line)
 
-    return "\n".join(clean_lines).strip(), plan_request, delete_kind, logs
+    return "\n".join(clean_lines).strip(), plan_request, delete_kind, logs, delete_today
 
 
 if __name__ == "__main__":
