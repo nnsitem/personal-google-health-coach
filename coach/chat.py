@@ -73,10 +73,13 @@ Special abilities (use these directives on their own line at the END of your rep
   actually had (e.g. "กินไปแล้ว 4 รอบ" right after a log, "I had 4 of those", "only drank half"):
   [ADJUST_LAST: {"kind": "drink", "times": 4}]
   "times" is the TOTAL multiple of the originally logged amount (4 = four servings in total,
-  0.5 = half a serving). kind is "food" or "drink" — check the recent food/drink logs in your
-  context to see what the last log was, and confirm the new total in your visible reply
-  (e.g. 4 × 200 ml = 「800 ml」). Do NOT also emit LOG_FOOD/LOG_DRINK for the same item.
-  The system appends the real save status.
+  0.5 = half a serving). kind is "food" or "drink" and must match the TYPE of the log being
+  adjusted, not the verb the user used ("กิน 4 รอบ" about a drink log still means kind "drink").
+  If the conversation shows a quoted log entry the user is replying to, THAT entry is the
+  target — use its type and amounts. Otherwise use the newest matching entry in the recent
+  food/drink logs context. Confirm the new total in your visible reply (e.g. 4 × 200 ml =
+  「800 ml」). Do NOT also emit LOG_FOOD/LOG_DRINK for the same item. The system appends the
+  real save status.
 """
 
 
@@ -337,13 +340,27 @@ def _build_context_message(user_id: str) -> str:
     return "\n\n".join(parts)
 
 
-def handle_message(user_id: str, user_text: str) -> str:
+def handle_message(user_id: str, user_text: str,
+                   quoted_message_id: str | None = None) -> tuple[str, list[int]]:
     """Process an inbound user message and generate a coach reply.
 
+    quoted_message_id: LINE id of the message the user quote-replied to, if
+    any — when it maps to a log confirmation we sent, that exact log becomes
+    the target for adjustments (instead of guessing "the last log").
+
     Stores both the user message and the reply in chat_messages.
-    Returns the reply text.
+    Returns (reply_text, created_log_rowids) — the rowids let the caller map
+    the outgoing confirmation message for future quote-replies.
     """
     db.init_db()
+
+    # Resolve a quote-reply to the specific log it points at
+    quoted_log = None
+    if quoted_message_id:
+        try:
+            quoted_log = db.get_log_for_message(user_id, quoted_message_id)
+        except Exception:
+            log.exception("failed to resolve quoted message %s", quoted_message_id)
 
     # Always refresh health data before responding so the coach has the latest.
     # Only skip if the last sync was very recent (< 10 minutes ago).
@@ -362,6 +379,17 @@ def handle_message(user_id: str, user_text: str) -> str:
     for msg in history[:-1]:  # exclude the message we just stored (it's the current one)
         prefix = "User" if msg["role"] == "user" else "Coach"
         conversation_parts.append(f"{prefix}: {msg['text']}")
+    if quoted_log:
+        try:  # stored with escaped unicode; re-dump so Thai names are readable
+            quoted_json = json.dumps(json.loads(quoted_log["content"]),
+                                     separators=(",", ":"), ensure_ascii=False)
+        except (json.JSONDecodeError, ValueError):
+            quoted_json = quoted_log["content"]
+        conversation_parts.append(
+            "(The user's next message is a quote-REPLY to this specific logged "
+            "entry — it is the target of any adjustment, NOT the most recent "
+            f"log: {quoted_json})"
+        )
     conversation_parts.append(f"User: {user_text}")
     conversation_parts.append("\nRespond as the coach in 3-5 sentences maximum. Complete your thought fully — do not leave sentences unfinished. If the user mentions a goal or preference you should remember, end your response with a line like [MEMORY: key = value] and I'll save it.")
 
@@ -373,7 +401,7 @@ def handle_message(user_id: str, user_text: str) -> str:
     if not api_key:
         reply = "I'm not configured yet — GEMINI_API_KEY is missing."
         _save_chat_message(user_id, "coach", reply)
-        return reply
+        return reply, []
 
     try:
         # Shorter budget than scheduled jobs — a person is waiting in chat.
@@ -411,13 +439,19 @@ def handle_message(user_id: str, user_text: str) -> str:
     # If the coach logged food/drinks described in chat, write them to Google
     # Health and append the REAL save status (the model is told not to claim
     # success itself).
+    created_rowids: list[int] = []
     for kind, analysis in chat_logs:
         try:
             from coach.food import log_chat_entry, adjust_last_log
             if kind == "adjust":
-                status = adjust_last_log(user_id, analysis)
+                status = adjust_last_log(
+                    user_id, analysis,
+                    insight_rowid=quoted_log["rowid"] if quoted_log else None,
+                )
             else:
-                status = log_chat_entry(user_id, kind, analysis)
+                status, rowid = log_chat_entry(user_id, kind, analysis)
+                if rowid is not None:
+                    created_rowids.append(rowid)
         except Exception:
             log.exception("failed to process chat %s directive", kind)
             status = "⚠️"
@@ -439,7 +473,7 @@ def handle_message(user_id: str, user_text: str) -> str:
     # Store coach reply
     _save_chat_message(user_id, "coach", reply)
 
-    return reply
+    return reply, created_rowids
 
 
 def _format_plan(plan: dict) -> str:
@@ -533,5 +567,5 @@ if __name__ == "__main__":
 
     message = sys.argv[1] if len(sys.argv) > 1 else "How did I sleep last night?"
     print(f"You: {message}\n")
-    reply = handle_message(DEFAULT_USER_ID, message)
+    reply, _ = handle_message(DEFAULT_USER_ID, message)
     print(f"Coach: {reply}")

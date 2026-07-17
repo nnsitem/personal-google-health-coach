@@ -207,21 +207,22 @@ def _detect_image_mime(data: bytes) -> str:
     return "image/jpeg"
 
 
-def _send(user_id: str, text: str, reply_token: str | None = None) -> None:
+def _send(user_id: str, text: str, reply_token: str | None = None) -> list[str]:
     """Send via the event's free reply token when possible, else push.
 
     Push messages count against the per-BOT monthly quota (500 on the free
     plan, shared across all users); replies to webhook events are free and
     unlimited. Reply tokens are single-use and short-lived, so slow paths
     (long Gemini retries) may miss the window — the push fallback covers that.
+
+    Returns the LINE message ids of what was sent (for quote-reply tracking).
     """
     if reply_token:
         try:
-            reply_text(reply_token, text)
-            return
+            return reply_text(reply_token, text).get("message_ids", [])
         except LineError as e:
             log.info("reply token unusable (%s) — falling back to push", e)
-    push_text(text, to=user_id)
+    return push_text(text, to=user_id).get("message_ids", [])
 
 
 def _send_welcome(user_id: str, reply_token: str | None = None) -> None:
@@ -242,7 +243,21 @@ def _send_welcome(user_id: str, reply_token: str | None = None) -> None:
     log.info("sent welcome to new user %s", user_id)
 
 
-def _process_text_message(user_id: str, text: str, reply_token: str | None = None) -> None:
+def _map_sent_log(user_id: str, message_ids: list[str], rowids: list[int]) -> None:
+    """Associate the sent log-confirmation message with the log(s) it confirms,
+    so a later quote-reply can target that exact log. Best-effort."""
+    if not message_ids or not rowids:
+        return
+    try:
+        # One confirmation message may cover several logs; a quote-reply to it
+        # most plausibly means the newest one.
+        db.map_log_message(message_ids[0], user_id, rowids[-1])
+    except Exception:
+        log.exception("failed to map log message for %s", user_id)
+
+
+def _process_text_message(user_id: str, text: str, reply_token: str | None = None,
+                          quoted_message_id: str | None = None) -> None:
     """Handle a text message in the background."""
     log.info("LINE message from %s: %s", user_id, text)
 
@@ -294,8 +309,9 @@ def _process_text_message(user_id: str, text: str, reply_token: str | None = Non
 
     # Pass to the chat agent
     try:
-        reply = handle_message(user_id, text)
-        _send(user_id, reply, reply_token)
+        reply, log_rowids = handle_message(user_id, text, quoted_message_id=quoted_message_id)
+        sent_ids = _send(user_id, reply, reply_token)
+        _map_sent_log(user_id, sent_ids, log_rowids)
         log.info("replied via LINE: %s", reply[:80])
     except Exception:
         log.exception("failed to handle LINE message")
@@ -393,8 +409,9 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
     try:
         image_bytes = get_image_content(message_id)
         mime = _detect_image_mime(image_bytes)
-        reply = handle_food_photo(user_id, image_bytes, mime_type=mime)
-        _send(user_id, reply, reply_token)
+        reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
+        sent_ids = _send(user_id, reply, reply_token)
+        _map_sent_log(user_id, sent_ids, [log_rowid] if log_rowid is not None else [])
         log.info("photo processed: %s", reply[:80])
     except Exception:
         log.exception("failed to handle photo")
@@ -445,7 +462,8 @@ async def line_webhook(request: Request, background_tasks: BackgroundTasks):
 
         # Process in the background so we return 200 to LINE immediately
         if msg_type == "text":
-            background_tasks.add_task(_process_text_message, user_id, msg["text"], reply_token)
+            background_tasks.add_task(_process_text_message, user_id, msg["text"],
+                                      reply_token, msg.get("quotedMessageId"))
         elif msg_type == "image":
             background_tasks.add_task(_process_image_message, user_id, msg.get("id", ""), reply_token)
 
@@ -474,7 +492,7 @@ async def chat_endpoint(request: Request):
     user_id = body.get("user_id", "U1068a1b9c15b44e7ff1439bdefdeb5dc")
     if not text:
         return {"error": "missing 'message' field"}
-    reply = handle_message(user_id, text)
+    reply, _ = handle_message(user_id, text)
     return {"reply": reply}
 
 

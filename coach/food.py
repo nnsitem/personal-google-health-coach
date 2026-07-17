@@ -328,29 +328,35 @@ def log_hydration_to_health(user_id: str, analysis: dict) -> bool:
         return False
 
 
-def _store_food_log(user_id: str, analysis: dict, synced: bool) -> None:
-    """Record the food log locally (for history + weekly reports)."""
+def _store_food_log(user_id: str, analysis: dict, synced: bool) -> int:
+    """Record the food log locally (for history + weekly reports).
+
+    Returns the insights rowid, so callers can map the LINE confirmation
+    message to this log for quote-reply targeting.
+    """
     with db.connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'food_log', ?, ?)",
             (user_id, json.dumps({**analysis, "synced_to_health": synced}), 1),
         )
+        return cur.lastrowid
 
 
-def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> str:
+def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str, int | None]:
     """Log a food/drink the user DESCRIBED in chat (no photo).
 
     `analysis` is the JSON the chat model emitted in a [LOG_FOOD]/[LOG_DRINK]
     directive — same shape as the vision output, plus optional meal_type /
-    time / date fields. Returns a short localized status line to append to
-    the coach's reply, so the visible confirmation reflects whether the
-    Google Health write actually happened.
+    time / date fields. Returns (status_line, insights_rowid_or_None): the
+    localized status is appended to the coach's reply so the visible
+    confirmation reflects whether the Google Health write actually happened,
+    and the rowid lets the caller map the sent message for quote-replies.
     """
     db.init_db()
     labels = LABELS.get(_lang_code(_get_language(user_id)), LABELS["en"])
 
     if not isinstance(analysis, dict):
-        return labels["not_synced"]
+        return labels["not_synced"], None
 
     # The model writes these as JSON numbers, but be lenient ("450" etc.)
     for field in ("calories_kcal", "protein_g", "total_carbohydrate_g",
@@ -360,7 +366,7 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> str:
 
     if kind == "drink":
         if round(analysis.get("volume_ml") or 0) <= 0:
-            return labels["empty_drink"]
+            return labels["empty_drink"], None
         synced_hydration = log_hydration_to_health(user_id, analysis)
         # Caloric drinks also count as nutrition, mirroring the photo flow.
         synced_nutrition = False
@@ -376,28 +382,32 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> str:
                 "time": analysis.get("time"),
                 "date": analysis.get("date"),
             })
-        _store_food_log(user_id, {**analysis, "type": "drink", "source": "chat"},
-                        synced_hydration)
+        rowid = _store_food_log(user_id, {**analysis, "type": "drink", "source": "chat"},
+                                synced_hydration)
         if synced_hydration and synced_nutrition:
-            return labels["synced_drink"] + " + " + labels["synced_food"]
-        return labels["synced_drink"] if synced_hydration else labels["not_synced"]
+            return labels["synced_drink"] + " + " + labels["synced_food"], rowid
+        return (labels["synced_drink"] if synced_hydration else labels["not_synced"]), rowid
 
     if round(analysis.get("calories_kcal") or 0) <= 0:
-        return labels["empty_food"]
+        return labels["empty_food"], None
     synced = log_food_to_health(user_id, analysis)
-    _store_food_log(user_id, {**analysis, "type": "food", "source": "chat"}, synced)
-    return labels["synced_food"] if synced else labels["not_synced"]
+    rowid = _store_food_log(user_id, {**analysis, "type": "food", "source": "chat"}, synced)
+    return (labels["synced_food"] if synced else labels["not_synced"]), rowid
 
 
-def adjust_last_log(user_id: str, params: dict | None) -> str:
-    """Rescale the user's most recent food/drink log ("I actually had 4 of
-    those", "กินไปแล้ว 4 รอบ", "only drank half").
+def adjust_last_log(user_id: str, params: dict | None,
+                    insight_rowid: int | None = None) -> str:
+    """Rescale a food/drink log ("I actually had 4 of those", "กินไปแล้ว 4
+    รอบ", "only drank half").
 
     params: {"kind": "food"|"drink" (optional), "times": N} where times is the
-    TOTAL multiple of the originally logged amount. Deletes the original
-    Google Health point(s), re-logs the scaled totals anchored at the ORIGINAL
-    log time, and updates the stored insights row in place (so history and
-    weekly reports don't double-count). Returns a localized status line.
+    TOTAL multiple of the originally logged amount. insight_rowid pins the
+    exact log (resolved from a LINE quote-reply); otherwise the newest log
+    whose type matches params["kind"] is used, falling back to the newest of
+    any type. Deletes the original Google Health point(s), re-logs the scaled
+    totals anchored at the ORIGINAL log time, and updates the stored insights
+    row in place (so history and weekly reports don't double-count). Returns
+    a localized status line.
     """
     db.init_db()
     labels = LABELS.get(_lang_code(_get_language(user_id)), LABELS["en"])
@@ -407,21 +417,40 @@ def adjust_last_log(user_id: str, params: dict | None) -> str:
         return labels["not_synced"]
 
     with db.connect() as conn:
-        row = conn.execute(
-            "SELECT rowid, ts, content FROM insights "
-            "WHERE user_id = ? AND kind = 'food_log' ORDER BY ts DESC LIMIT 1",
-            (user_id,),
-        ).fetchone()
-    if not row:
+        if insight_rowid is not None:
+            rows = conn.execute(
+                "SELECT rowid, ts, content FROM insights "
+                "WHERE user_id = ? AND kind = 'food_log' AND rowid = ?",
+                (user_id, insight_rowid),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT rowid, ts, content FROM insights "
+                "WHERE user_id = ? AND kind = 'food_log' ORDER BY ts DESC LIMIT 10",
+                (user_id,),
+            ).fetchall()
+    parsed = []
+    for r in rows:
+        try:
+            parsed.append((r, json.loads(r["content"])))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    if not parsed:
         return labels["no_recent_log"]
 
-    try:
-        original = json.loads(row["content"])
-    except (json.JSONDecodeError, ValueError):
-        return labels["no_recent_log"]
+    # Prefer the newest log matching the kind the model asked for ("drank 4x"
+    # should never grab a meal), but fall back to the newest of any type.
+    want = str(params.get("kind") or "").lower()
+    row, original = parsed[0]
+    if insight_rowid is None and want in ("food", "drink"):
+        for r, a in parsed:
+            if (a.get("type") or "food") == want:
+                row, original = r, a
+                break
 
-    kind = str(params.get("kind") or original.get("type") or "food").lower()
-    kind = "drink" if kind == "drink" else "food"
+    # The stored log's own type decides which Google Health data points to
+    # touch — never the model's guess, or a wrong guess deletes wrong data.
+    kind = "drink" if original.get("type") == "drink" else "food"
 
     scaled = dict(original)
     for field in ("calories_kcal", "protein_g", "total_carbohydrate_g",
@@ -577,11 +606,14 @@ LABELS = {
 }
 
 
-def handle_food_photo(user_id: str, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+def handle_food_photo(user_id: str, image_bytes: bytes,
+                      mime_type: str = "image/jpeg") -> tuple[str, int | None]:
     """Full flow: analyze image → log to Google Health → return a LINE reply.
 
     Handles both food (nutrition-log) and drinks (hydration-log).
     Reply language follows the user's stored preference.
+    Returns (reply_text, insights_rowid_or_None) — the rowid lets the caller
+    map the sent confirmation message for later quote-replies.
     """
     db.init_db()
 
@@ -591,27 +623,27 @@ def handle_food_photo(user_id: str, image_bytes: bytes, mime_type: str = "image/
     try:
         analysis = analyze_food_image(user_id, image_bytes, mime_type, language=language)
     except gemini.GeminiQuotaExhausted:
-        return labels["quota_exhausted"]
+        return labels["quota_exhausted"], None
     except gemini.GeminiUnavailable:
-        return labels["ai_busy"]
+        return labels["ai_busy"], None
     if not analysis or analysis.get("type") not in ("food", "drink"):
-        return labels["unclear"]
+        return labels["unclear"], None
 
     if analysis["type"] == "drink":
         return _handle_drink(user_id, analysis, labels)
     return _handle_food(user_id, analysis, labels)
 
 
-def _handle_food(user_id: str, analysis: dict, labels: dict) -> str:
+def _handle_food(user_id: str, analysis: dict, labels: dict) -> tuple[str, int | None]:
     cal = round(float(analysis.get("calories_kcal") or 0))
 
     # Don't log if there's no real portion (e.g. empty plate / not food)
     if cal <= 0:
         log.info("food calories is 0 — skipping nutrition log")
-        return labels["empty_food"]
+        return labels["empty_food"], None
 
     synced = log_food_to_health(user_id, analysis)
-    _store_food_log(user_id, analysis, synced)
+    rowid = _store_food_log(user_id, analysis, synced)
 
     # Show the localized name in the reply, English as fallback
     name = analysis.get("food_name_local") or analysis.get("food_name_en") or "meal"
@@ -636,16 +668,16 @@ def _handle_food(user_id: str, analysis: dict, labels: dict) -> str:
     if confidence == "low":
         lines.append(labels["low_conf"])
 
-    return "\n".join(lines)
+    return "\n".join(lines), rowid
 
 
-def _handle_drink(user_id: str, analysis: dict, labels: dict) -> str:
+def _handle_drink(user_id: str, analysis: dict, labels: dict) -> tuple[str, int | None]:
     ml = round(float(analysis.get("volume_ml") or 0))
 
     # Don't log an empty container
     if ml <= 0:
         log.info("drink volume is 0 — skipping hydration log")
-        return labels["empty_drink"]
+        return labels["empty_drink"], None
 
     synced_hydration = log_hydration_to_health(user_id, analysis)
 
@@ -664,7 +696,7 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict) -> str:
         }
         synced_nutrition = log_food_to_health(user_id, nutrition_analysis)
 
-    _store_food_log(user_id, analysis, synced_hydration)
+    rowid = _store_food_log(user_id, analysis, synced_hydration)
 
     name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
     protein = round(float(analysis.get("protein_g") or 0))
@@ -701,7 +733,7 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict) -> str:
     if confidence == "low":
         lines.append(labels["low_conf"])
 
-    return "\n".join(lines)
+    return "\n".join(lines), rowid
 
 
 if __name__ == "__main__":
@@ -715,4 +747,4 @@ if __name__ == "__main__":
         sys.exit(1)
     with open(sys.argv[1], "rb") as f:
         img = f.read()
-    print(handle_food_photo(DEFAULT_USER_ID, img))
+    print(handle_food_photo(DEFAULT_USER_ID, img)[0])

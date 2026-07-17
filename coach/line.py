@@ -51,11 +51,17 @@ def send_text(text: str, to: str | None = None) -> dict:
         text = text[5000:]
 
     try:
-        api.push_message(PushMessageRequest(to=to, messages=messages))
+        resp = api.push_message(PushMessageRequest(to=to, messages=messages))
         log.info("LINE push message sent to %s", to)
-        return {"ok": True}
+        return {"ok": True, "message_ids": _sent_ids(resp)}
     except Exception as e:
         raise LineError(f"LINE push failed: {e}")
+
+
+def _sent_ids(resp) -> list[str]:
+    """LINE message ids of the messages just sent (for quote-reply tracking)."""
+    sent = getattr(resp, "sent_messages", None) or []
+    return [m.id for m in sent if getattr(m, "id", None)]
 
 
 def get_image_content(message_id: str) -> bytes:
@@ -81,8 +87,8 @@ def reply_text(reply_token: str, text: str) -> dict:
         text = text[5000:]
 
     try:
-        api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
-        return {"ok": True}
+        resp = api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        return {"ok": True, "message_ids": _sent_ids(resp)}
     except Exception as e:
         raise LineError(f"LINE reply failed: {e}")
 

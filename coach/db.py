@@ -100,6 +100,13 @@ CREATE TABLE IF NOT EXISTS sync_log (
     detail    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS log_messages (
+    message_id    TEXT PRIMARY KEY,   -- LINE id of the coach's log-confirmation message
+    user_id       TEXT NOT NULL,
+    insight_rowid INTEGER NOT NULL,   -- insights rowid of the food_log it confirms
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS failure_state (
     user_id     TEXT NOT NULL,
     kind        TEXT NOT NULL,              -- 'google_auth' | 'sync' | 'daily_summary'
@@ -589,6 +596,31 @@ def upsert_sleep_session(user_id: str, start: str, end: str, stages, efficiency=
             """,
             (user_id, start, end, json.dumps(stages), efficiency, score),
         )
+
+
+def map_log_message(message_id: str, user_id: str, insight_rowid: int) -> None:
+    """Remember which food_log a sent LINE message confirms, so a later
+    quote-REPLY to that message can target exactly that log."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO log_messages (message_id, user_id, insight_rowid) VALUES (?, ?, ?)",
+            (message_id, user_id, insight_rowid),
+        )
+
+
+def get_log_for_message(user_id: str, message_id: str) -> dict | None:
+    """The food_log a quoted LINE message refers to, or None if the quoted
+    message wasn't a log confirmation (or belongs to another user)."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT i.rowid AS rowid, i.ts AS ts, i.content AS content
+            FROM log_messages m JOIN insights i ON i.rowid = m.insight_rowid
+            WHERE m.message_id = ? AND m.user_id = ? AND i.user_id = ?
+            """,
+            (message_id, user_id, user_id),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def bump_failure(user_id: str, kind: str, detail: str = "") -> tuple[int, bool]:
