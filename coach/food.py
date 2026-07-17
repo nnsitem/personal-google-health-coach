@@ -294,10 +294,11 @@ def _build_hydration_datapoint(analysis: dict, tz=None) -> dict:
     }
 
 
-def log_food_to_health(user_id: str, analysis: dict) -> bool:
+def log_food_to_health(user_id: str, analysis: dict) -> tuple[bool, str | None]:
     """Write the analyzed meal to Google Health as a nutrition-log data point.
 
-    Returns True on success, False on failure.
+    Returns (success, resource_name). The resource name is stored with the
+    log so a later targeted delete removes exactly this point.
     """
     # Log time follows the USER's local clock, unless the analysis carries an
     # explicit time or a named meal (chat logs: "log my breakfast ...").
@@ -306,26 +307,29 @@ def log_food_to_health(user_id: str, analysis: dict) -> bool:
 
     try:
         client = client_for_user(user_id)
-        client.create_data_point("nutrition-log", data_point)
+        created = client.create_data_point("nutrition-log", data_point)
         log.info("logged nutrition to Google Health: %s",
                  analysis.get("food_name_en") or analysis.get("food_name_local"))
-        return True
+        return True, (created or {}).get("name")
     except HealthAPIError as e:
         log.error("failed to write nutrition-log to Google Health: %s", e)
-        return False
+        return False, None
 
 
-def log_hydration_to_health(user_id: str, analysis: dict) -> bool:
-    """Write the analyzed drink to Google Health as a hydration-log data point."""
+def log_hydration_to_health(user_id: str, analysis: dict) -> tuple[bool, str | None]:
+    """Write the analyzed drink to Google Health as a hydration-log data point.
+
+    Returns (success, resource_name), like log_food_to_health.
+    """
     data_point = _build_hydration_datapoint(analysis, db.user_tz(db.get_user(user_id)))
     try:
         client = client_for_user(user_id)
-        client.create_data_point("hydration-log", data_point)
+        created = client.create_data_point("hydration-log", data_point)
         log.info("logged hydration to Google Health: %s ml", analysis.get("volume_ml"))
-        return True
+        return True, (created or {}).get("name")
     except HealthAPIError as e:
         log.error("failed to write hydration-log to Google Health: %s", e)
-        return False
+        return False, None
 
 
 def _store_food_log(user_id: str, analysis: dict, synced: bool) -> int:
@@ -367,11 +371,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str,
     if kind == "drink":
         if round(analysis.get("volume_ml") or 0) <= 0:
             return labels["empty_drink"], None
-        synced_hydration = log_hydration_to_health(user_id, analysis)
+        synced_hydration, hydration_point = log_hydration_to_health(user_id, analysis)
         # Caloric drinks also count as nutrition, mirroring the photo flow.
-        synced_nutrition = False
+        synced_nutrition, nutrition_point = False, None
         if round(analysis.get("calories_kcal") or 0) > 10:
-            synced_nutrition = log_food_to_health(user_id, {
+            synced_nutrition, nutrition_point = log_food_to_health(user_id, {
                 "food_name_en": analysis.get("drink_name_en")
                                 or analysis.get("drink_name_local") or "drink",
                 "calories_kcal": analysis.get("calories_kcal", 0),
@@ -382,17 +386,118 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str,
                 "time": analysis.get("time"),
                 "date": analysis.get("date"),
             })
-        rowid = _store_food_log(user_id, {**analysis, "type": "drink", "source": "chat"},
-                                synced_hydration)
+        rowid = _store_food_log(
+            user_id,
+            {**analysis, "type": "drink", "source": "chat",
+             "health_point_names": [n for n in (hydration_point, nutrition_point) if n]},
+            synced_hydration,
+        )
         if synced_hydration and synced_nutrition:
             return labels["synced_drink"] + " + " + labels["synced_food"], rowid
         return (labels["synced_drink"] if synced_hydration else labels["not_synced"]), rowid
 
     if round(analysis.get("calories_kcal") or 0) <= 0:
         return labels["empty_food"], None
-    synced = log_food_to_health(user_id, analysis)
-    rowid = _store_food_log(user_id, {**analysis, "type": "food", "source": "chat"}, synced)
+    synced, point_name = log_food_to_health(user_id, analysis)
+    rowid = _store_food_log(
+        user_id,
+        {**analysis, "type": "food", "source": "chat",
+         "health_point_names": [n for n in (point_name,) if n]},
+        synced,
+    )
     return (labels["synced_food"] if synced else labels["not_synced"]), rowid
+
+
+def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
+    """Remove the Google Health data points behind a stored log.
+
+    Prefers the exact resource names captured at log time; logs stored before
+    names were captured fall back to newest-point deletion (the pre-existing
+    behavior). Returns True when Google Health no longer holds the points
+    (including when nothing was ever synced).
+    """
+    names = content.get("health_point_names") or []
+    if names:
+        by_type: dict[str, list[str]] = {}
+        for n in names:
+            try:
+                dtype = n.split("/dataTypes/")[1].split("/")[0]
+            except IndexError:
+                continue
+            by_type.setdefault(dtype, []).append(n)
+        try:
+            client = client_for_user(user_id)
+            for dtype, ns in by_type.items():
+                client.batch_delete_data_points(dtype, ns)
+            return True
+        except HealthAPIError as e:
+            log.error("failed to delete stored points for adjustment: %s", e)
+            return False
+
+    if not content.get("synced_to_health"):
+        return True  # nothing in Google Health to remove
+
+    # Legacy row without stored names: newest-point deletion, like before.
+    if delete_last_log(user_id, "drink" if kind == "drink" else "food") is None:
+        return False
+    if kind == "drink" and _num(content.get("calories_kcal")) > 10:
+        delete_last_log(user_id, "food")  # caloric drink's nutrition twin, best-effort
+    return True
+
+
+def delete_log(user_id: str, insight_rowid: int) -> str | None:
+    """Delete a SPECIFIC stored log (resolved from a quote-reply): its Google
+    Health point(s) and the local insights row. Returns a display label of
+    what was removed, or None on failure/not found."""
+    db.init_db()
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT rowid, content FROM insights "
+            "WHERE user_id = ? AND kind = 'food_log' AND rowid = ?",
+            (user_id, insight_rowid),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        content = json.loads(row["content"])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    kind = "drink" if content.get("type") == "drink" else "food"
+
+    if not _delete_log_points(user_id, content, kind):
+        return None
+
+    with db.connect() as conn:
+        conn.execute("DELETE FROM insights WHERE rowid = ?", (row["rowid"],))
+        conn.execute("DELETE FROM log_messages WHERE insight_rowid = ?", (row["rowid"],))
+
+    if kind == "drink":
+        ml = _num(content.get("volume_ml"))
+        return (content.get("drink_name_local") or content.get("drink_name_en")
+                or (f"{round(ml)} ml" if ml else "drink"))
+    return (content.get("food_name_local") or content.get("food_name_en") or "meal")
+
+
+def delete_newest_log(user_id: str, kind: str) -> str | None:
+    """Delete the newest stored log of the given kind ('food'|'drink').
+
+    Falls back to raw newest-point deletion in Google Health when no local
+    row exists (e.g. logs made before local history was kept)."""
+    db.init_db()
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT rowid, content FROM insights "
+            "WHERE user_id = ? AND kind = 'food_log' ORDER BY ts DESC LIMIT 10",
+            (user_id,),
+        ).fetchall()
+    for row in rows:
+        try:
+            content = json.loads(row["content"])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if ("drink" if content.get("type") == "drink" else "food") == kind:
+            return delete_log(user_id, row["rowid"])
+    return delete_last_log(user_id, kind)
 
 
 def adjust_last_log(user_id: str, params: dict | None,
@@ -469,21 +574,18 @@ def adjust_last_log(user_id: str, params: dict | None,
     except (ValueError, TypeError):
         pass
 
-    was_synced = bool(original.get("synced_to_health"))
+    # Remove the original Google Health point(s) first — refuse to re-log if
+    # they can't be removed (double-counting is worse than a failed adjustment).
+    if not _delete_log_points(user_id, original, kind):
+        return labels["not_synced"]
 
+    new_points: list[str] = []
     if kind == "drink":
-        # Refuse to re-log if the original can't be removed — double-counting
-        # is worse than a failed adjustment.
-        if was_synced and delete_last_log(user_id, "drink") is None:
-            return labels["not_synced"]
-        # A caloric drink also wrote a nutrition twin at the same moment;
-        # remove it too before re-logging (best-effort — it is the newest
-        # nutrition point unless something was logged in between).
-        if was_synced and _num(original.get("calories_kcal")) > 10:
-            delete_last_log(user_id, "food")
-        synced = log_hydration_to_health(user_id, scaled)
+        synced, hydration_point = log_hydration_to_health(user_id, scaled)
+        if hydration_point:
+            new_points.append(hydration_point)
         if synced and _num(scaled.get("calories_kcal")) > 10:
-            log_food_to_health(user_id, {
+            _, nutrition_point = log_food_to_health(user_id, {
                 "food_name_en": scaled.get("drink_name_en")
                                 or scaled.get("drink_name_local") or "drink",
                 "calories_kcal": scaled.get("calories_kcal", 0),
@@ -494,12 +596,15 @@ def adjust_last_log(user_id: str, params: dict | None,
                 "time": scaled.get("time"),
                 "date": scaled.get("date"),
             })
+            if nutrition_point:
+                new_points.append(nutrition_point)
         ok_label = labels["synced_drink"]
     else:
-        if was_synced and delete_last_log(user_id, "food") is None:
-            return labels["not_synced"]
-        synced = log_food_to_health(user_id, scaled)
+        synced, food_point = log_food_to_health(user_id, scaled)
+        if food_point:
+            new_points.append(food_point)
         ok_label = labels["synced_food"]
+    scaled["health_point_names"] = new_points
 
     with db.connect() as conn:
         conn.execute(
@@ -642,8 +747,12 @@ def _handle_food(user_id: str, analysis: dict, labels: dict) -> tuple[str, int |
         log.info("food calories is 0 — skipping nutrition log")
         return labels["empty_food"], None
 
-    synced = log_food_to_health(user_id, analysis)
-    rowid = _store_food_log(user_id, analysis, synced)
+    synced, point_name = log_food_to_health(user_id, analysis)
+    rowid = _store_food_log(
+        user_id,
+        {**analysis, "health_point_names": [n for n in (point_name,) if n]},
+        synced,
+    )
 
     # Show the localized name in the reply, English as fallback
     name = analysis.get("food_name_local") or analysis.get("food_name_en") or "meal"
@@ -679,12 +788,12 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict) -> tuple[str, int 
         log.info("drink volume is 0 — skipping hydration log")
         return labels["empty_drink"], None
 
-    synced_hydration = log_hydration_to_health(user_id, analysis)
+    synced_hydration, hydration_point = log_hydration_to_health(user_id, analysis)
 
     # If the drink has significant calories/protein (e.g. protein shake, juice,
     # smoothie), also log it as a nutrition entry.
     cal = round(float(analysis.get("calories_kcal") or 0))
-    synced_nutrition = False
+    synced_nutrition, nutrition_point = False, None
     if cal > 10:
         # Build a food-like analysis dict for the nutrition log
         nutrition_analysis = {
@@ -694,9 +803,13 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict) -> tuple[str, int 
             "total_carbohydrate_g": analysis.get("total_carbohydrate_g", 0),
             "total_fat_g": analysis.get("total_fat_g", 0),
         }
-        synced_nutrition = log_food_to_health(user_id, nutrition_analysis)
+        synced_nutrition, nutrition_point = log_food_to_health(user_id, nutrition_analysis)
 
-    rowid = _store_food_log(user_id, analysis, synced_hydration)
+    rowid = _store_food_log(
+        user_id,
+        {**analysis, "health_point_names": [n for n in (hydration_point, nutrition_point) if n]},
+        synced_hydration,
+    )
 
     name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
     protein = round(float(analysis.get("protein_g") or 0))

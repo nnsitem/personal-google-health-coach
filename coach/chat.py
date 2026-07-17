@@ -49,9 +49,12 @@ Special abilities (use these directives on their own line at the END of your rep
 - To save a fact/preference: [MEMORY: key = value]
 - To create a workout plan when the user asks for one: [CREATE_PLAN: brief description of what they want]
   After emitting this, tell the user you're putting together their plan and will share it.
-- To delete the user's most recent food or drink log when they ask (e.g. "delete that", "remove my last meal", "ลบรายการล่าสุด"):
+- To delete a food or drink log when the user asks (e.g. "delete that", "remove my last meal",
+  "ลบรายการล่าสุด", or a quote-REPLY to a log saying "ลบ log อันนี้"):
   [DELETE_LAST: food] for a meal, or [DELETE_LAST: drink] for a drink.
-  After emitting this, confirm you're removing it.
+  If the user is quote-replying to a specific logged entry (shown in the context), the system
+  deletes EXACTLY that entry — use its type as the kind. Otherwise the newest log of that kind
+  is deleted. After emitting this, confirm which item you're removing.
 - To log food or drinks the user describes in words (e.g. "log: grilled pork 3 skewers with sticky rice",
   "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว"):
   [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
@@ -458,17 +461,21 @@ def handle_message(user_id: str, user_text: str,
         if status:
             reply = reply + "\n\n" + status
 
-    # If the coach requested a deletion, remove the last log
+    # If the coach requested a deletion: a quote-reply deletes exactly the
+    # quoted log; otherwise the newest log of that kind.
     if delete_kind:
         try:
-            from coach.food import delete_last_log
-            deleted = delete_last_log(user_id, delete_kind)
+            from coach.food import delete_log, delete_newest_log
+            if quoted_log:
+                deleted = delete_log(user_id, quoted_log["rowid"])
+            else:
+                deleted = delete_newest_log(user_id, delete_kind)
             if deleted:
                 reply = reply + f"\n\n🗑️ ({deleted})"
             else:
                 reply = reply + "\n\n(ไม่พบรายการล่าสุดให้ลบ หรือยังลบไม่สำเร็จ)"
         except Exception:
-            log.exception("failed to delete last log")
+            log.exception("failed to delete log")
 
     # Store coach reply
     _save_chat_message(user_id, "coach", reply)
