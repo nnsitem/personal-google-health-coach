@@ -237,7 +237,8 @@ def _send_welcome(user_id: str, reply_token: str | None = None) -> None:
         "2️⃣ Set your Gemini AI key\n"
         "   → Send: set key\n"
         "   (Get a free key at aistudio.google.com/apikey)\n\n"
-        "Once both are set, just chat with me or send a food photo! 🍽️💪",
+        "Once both are set, just chat with me or send a food photo! 🍽️💪\n\n"
+        "📖 Send: help — to see everything I can do",
         reply_token,
     )
     log.info("sent welcome to new user %s", user_id)
@@ -259,6 +260,60 @@ def _map_sent_log(user_id: str, message_ids: list[str], rowids: list[int]) -> No
         log.exception("failed to map log message for %s", user_id)
 
 
+HELP_TEXTS = {
+    "en": (
+        "📖 What I can do\n\n"
+        "🔧 Setup\n"
+        "• login — connect Google Health\n"
+        "• set key — set your Gemini AI key\n\n"
+        "💬 Just chat\n"
+        "Ask about your sleep, steps, heart rate, calories or trends — "
+        "e.g. \"How did I sleep last night?\"\n\n"
+        "🍽️ Log food & drinks\n"
+        "• Send a photo of your meal or drink — I'll analyze and log it\n"
+        "• Or type: \"log: grilled chicken with rice\"\n"
+        "• Say when it was: \"log breakfast: ...\", \"log 2 glasses of water at 9:00\"\n\n"
+        "✏️ Fix a log\n"
+        "• Reply (quote) a log message: \"I had 4 of those\", \"only half\"\n"
+        "• \"delete my last meal\" / \"delete my last drink\", or quote-reply \"delete this\"\n"
+        "• \"delete all today's logs\" — clears the whole day (I'll ask you to confirm)\n\n"
+        "🏋️ Coaching\n"
+        "• \"Create a workout plan for ...\"\n"
+        "• Daily summary every morning, weekly report on Sunday\n"
+        "• Tell me your goals or preferred language and I'll remember\n\n"
+        "📖 help — show this menu"
+    ),
+    "th": (
+        "📖 สิ่งที่ผมช่วยได้\n\n"
+        "🔧 ตั้งค่า\n"
+        "• login — เชื่อมต่อ Google Health\n"
+        "• set key — ตั้งค่า Gemini AI key\n\n"
+        "💬 คุยได้เลย\n"
+        "ถามเรื่องการนอน ก้าวเดิน หัวใจ แคลอรี หรือแนวโน้มย้อนหลัง — "
+        "เช่น \"เมื่อคืนนอนเป็นยังไงบ้าง\"\n\n"
+        "🍽️ บันทึกอาหาร/เครื่องดื่ม\n"
+        "• ส่งรูปอาหารหรือเครื่องดื่ม เดี๋ยวผมวิเคราะห์และบันทึกให้\n"
+        "• หรือพิมพ์: \"ลงโภชนาการ ข้าวมันไก่ 1 จาน\"\n"
+        "• ระบุมื้อ/เวลาได้: \"ลงมื้อเช้า ...\", \"บันทึกน้ำ 2 แก้ว ตอน 9 โมง\"\n\n"
+        "✏️ แก้ไขรายการ\n"
+        "• Reply (quote) ไปที่ข้อความบันทึก: \"กินไป 4 รอบ\", \"กินแค่ครึ่งเดียว\"\n"
+        "• \"ลบรายการล่าสุด\" หรือ quote แล้วพิมพ์ \"ลบอันนี้\"\n"
+        "• \"ลบรายการวันนี้ทั้งหมด\" — ล้างทั้งวัน (ผมจะถามยืนยันก่อน)\n\n"
+        "🏋️ โค้ชชิ่ง\n"
+        "• \"สร้างแผนออกกำลังกายให้หน่อย ...\"\n"
+        "• สรุปประจำวันทุกเช้า และรายงานประจำสัปดาห์วันอาทิตย์\n"
+        "• บอกเป้าหมายหรือภาษาที่อยากให้ใช้ได้เลย เดี๋ยวผมจำไว้\n\n"
+        "📖 help — แสดงเมนูนี้"
+    ),
+}
+
+
+def _help_text(user_id: str) -> str:
+    lang = (db.get_user_language(user_id) or "").strip().lower()
+    is_th = lang.startswith("th") or "thai" in lang or "ไทย" in lang
+    return HELP_TEXTS["th" if is_th else "en"]
+
+
 def _process_text_message(user_id: str, text: str, reply_token: str | None = None,
                           quoted_message_id: str | None = None,
                           inbound_message_id: str | None = None) -> None:
@@ -267,6 +322,13 @@ def _process_text_message(user_id: str, text: str, reply_token: str | None = Non
 
     # Check for onboarding commands before passing to chat agent
     lower = text.strip().lower()
+
+    # Help command: static menu of everything the coach can do (free, no AI
+    # call, works even before setup is complete)
+    if lower in ("help", "ช่วยเหลือ", "วิธีใช้", "เมนู", "commands", "command", "?"):
+        _send(user_id, _help_text(user_id), reply_token)
+        log.info("sent help menu to %s", user_id)
+        return
 
     # Login command: send the Google OAuth URL
     if lower in ("login", "login google", "connect google", "เชื่อมต่อ google", "action=login_google"):
