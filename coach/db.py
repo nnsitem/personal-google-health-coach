@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS users (
     language         TEXT NOT NULL DEFAULT 'English',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     active           INTEGER NOT NULL DEFAULT 1,
-    onboarding_state TEXT NOT NULL DEFAULT ''  -- '' | 'awaiting_gemini_key'
+    onboarding_state TEXT NOT NULL DEFAULT '',  -- '' | 'awaiting_gemini_key'
+    oauth_code_verifier TEXT                    -- PKCE verifier for the in-flight OAuth attempt
 );
 
 CREATE TABLE IF NOT EXISTS metrics (
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 # Columns to add to existing tables (table_name, column_def).
 _ADD_COLUMNS = [
+    ("users", "oauth_code_verifier TEXT"),
     ("metrics", "user_id TEXT NOT NULL DEFAULT ''"),
     ("sleep_sessions", "user_id TEXT NOT NULL DEFAULT ''"),
     ("exercise_sessions", "user_id TEXT NOT NULL DEFAULT ''"),

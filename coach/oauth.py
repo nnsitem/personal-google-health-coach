@@ -92,6 +92,15 @@ def build_auth_url(user_id: str, redirect_uri: str) -> str:
         prompt="consent",
         state=_sign_state(user_id),
     )
+
+    # google-auth-oauthlib (>=1.2) auto-generates a PKCE code verifier and puts
+    # its challenge in the auth URL. The callback runs in a separate request
+    # with a NEW Flow object, so the verifier must be persisted now or the
+    # token exchange fails with "(invalid_grant) Missing code verifier".
+    verifier = getattr(flow, "code_verifier", None)
+    if verifier:
+        db.update_user(user_id, oauth_code_verifier=verifier)
+
     return auth_url
 
 
@@ -113,15 +122,21 @@ def exchange_code(code: str, state: str, redirect_uri: str) -> tuple[str | None,
             scopes=GOOGLE_HEALTH_SCOPES,
             redirect_uri=redirect_uri,
         )
+        # Restore the PKCE verifier saved when the auth URL was built — the
+        # code challenge Google received must be answered with this exact value.
+        user = db.get_user(user_id)
+        verifier = (user or {}).get("oauth_code_verifier")
+        if verifier:
+            flow.code_verifier = verifier
         flow.fetch_token(code=code)
         creds = flow.credentials
     except Exception as e:
         log.exception("token exchange failed")
         return user_id, f"Token exchange failed: {e}"
 
-    # Store the token JSON in the users table
+    # Store the token JSON in the users table; the verifier is single-use.
     token_json = creds.to_json()
-    db.update_user(user_id, google_token_json=token_json)
+    db.update_user(user_id, google_token_json=token_json, oauth_code_verifier="")
     log.info("stored Google token for user %s", user_id)
 
     return user_id, None
