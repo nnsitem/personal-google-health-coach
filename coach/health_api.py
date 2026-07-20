@@ -159,11 +159,30 @@ class HealthClient:
 
         data_type: kebab-case name (e.g., 'nutrition-log')
         data_point: a DataPoint dict with the typed payload
+
+        dataPoints.create returns an Operation envelope, NOT the DataPoint
+        itself — the created resource (with its identifiable "name", e.g.
+        'users/me/dataTypes/nutrition-log/dataPoints/{id}') lives nested in
+        operation['response'], wrapped with an '@type' key. Returning the raw
+        Operation here previously made callers read the OPERATION's own
+        "name" (an unrelated 'operations/...' resource) instead of the data
+        point's — so a later delete/adjustment quietly matched nothing and
+        the original entry was never actually removed.
         """
-        return self._post(
+        op = self._post(
             f"users/me/dataTypes/{data_type}/dataPoints",
             data_point,
         )
+        if isinstance(op, dict) and "response" in op:
+            if op.get("done") is False:
+                log.warning(
+                    "dataPoints.create for %s returned a pending operation "
+                    "(done=false) — its resource name may not be usable yet",
+                    data_type,
+                )
+            return op.get("response") or {}
+        # Defensive: tolerate a bare DataPoint if the API ever returns one directly
+        return op if isinstance(op, dict) else {}
 
     def batch_delete_data_points(self, data_type: str, names: list[str]) -> dict:
         """Delete data points by their resource names. Requires a *.writeonly scope.

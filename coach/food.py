@@ -425,14 +425,24 @@ def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
             except IndexError:
                 continue
             by_type.setdefault(dtype, []).append(n)
-        try:
-            client = client_for_user(user_id)
-            for dtype, ns in by_type.items():
-                client.batch_delete_data_points(dtype, ns)
-            return True
-        except HealthAPIError as e:
-            log.error("failed to delete stored points for adjustment: %s", e)
-            return False
+        if by_type:
+            try:
+                client = client_for_user(user_id)
+                for dtype, ns in by_type.items():
+                    client.batch_delete_data_points(dtype, ns)
+                return True
+            except HealthAPIError as e:
+                log.error("failed to delete stored points for adjustment: %s", e)
+                return False
+        # Stored names existed but none parsed into a data type — e.g. rows
+        # written by a prior bug that captured the API's Operation name
+        # instead of the created DataPoint's name. Silently reporting success
+        # here would leave the original point untouched while a new one gets
+        # created. Fall through to the newest-point fallback below instead.
+        log.warning(
+            "health_point_names present but unparseable (%r) — falling back "
+            "to newest-point deletion", names,
+        )
 
     if not content.get("synced_to_health"):
         return True  # nothing in Google Health to remove
