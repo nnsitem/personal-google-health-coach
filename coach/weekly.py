@@ -12,6 +12,7 @@ from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
 from coach.line import send_text, LineError
+from coach.sync import run_sync
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +169,13 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
 def run_weekly_report(user_id: str) -> str:
     """Full weekly flow: generate report and send via LINE."""
     db.init_db()
+
+    # Sync latest data so the snapshot is fresh
+    log.info("refreshing health data before weekly report...")
+    try:
+        run_sync(user_id)
+    except Exception:
+        log.exception("sync failed before weekly report — proceeding with stale data")
 
     log.info("generating weekly report...")
     message = generate_weekly_report(user_id)
