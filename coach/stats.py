@@ -297,6 +297,31 @@ def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float])
     return {"score": score, "verdict": verdict, "signals": signals, "anomalies": anomalies}
 
 
+def _exercise_series(user_id: str, days: int) -> tuple[dict[str, float], dict[str, int]]:
+    """Return ({day: total_minutes}, {day: session_count}) from exercise_sessions,
+    bucketed by the session's start date."""
+    today = datetime.now(TZ).date()
+    cutoff = (today - timedelta(days=days)).isoformat()
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT start, end FROM exercise_sessions WHERE user_id = ? AND start >= ? ORDER BY start",
+            (user_id, cutoff),
+        ).fetchall()
+
+    minutes: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        try:
+            st = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
+            en = datetime.fromisoformat(row["end"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        d = st.astimezone(TZ).date().isoformat()
+        minutes[d] = minutes.get(d, 0.0) + (en - st).total_seconds() / 60
+        counts[d] = counts.get(d, 0) + 1
+    return minutes, counts
+
+
 def build_trends(user_id: str) -> dict:
     """Build a compact multi-window summary with today, yesterday, weekly and
     monthly averages, and week-over-week trends for each metric.
@@ -342,6 +367,20 @@ def build_trends(user_id: str) -> dict:
     }
 
     out["readiness"] = _readiness(series, sleep_map)
+
+    # Exercise sessions (actual workouts vs plan adherence)
+    exercise_min_map, exercise_count_map = _exercise_series(user_id, 35)
+    this_week_min = _window_avg(exercise_min_map, 7, 0)
+    last_week_min = _window_avg(exercise_min_map, 14, 7)
+    out["exercise_minutes"] = {
+        "week_avg": this_week_min,
+        "month_avg": _window_avg(exercise_min_map, 30, 0),
+        "trend": _trend(this_week_min, last_week_min),
+        "sessions_this_week": sum(
+            c for d, c in exercise_count_map.items()
+            if 0 <= (today - datetime.fromisoformat(d).date()).days < 7
+        ),
+    }
 
     return out
 

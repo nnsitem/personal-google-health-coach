@@ -38,6 +38,12 @@ Formatting rules (LINE does NOT support markdown/bold/italic):
 Reference actual numbers from the data. Don't invent stats.
 If data is missing for a metric, skip it gracefully.
 If "todays_workout" is present in the snapshot, mention it in the 🎯 Today's Focus section.
+Use "exercise_sessions" (the user's actual logged workouts) to give real feedback:
+if there's a session from yesterday or today, acknowledge what they actually did
+(activity_type, duration_min) — and if "todays_workout" is also present, compare
+against it (adherence: did they do the planned workout, something different, or
+skip it?) rather than just restating the plan blindly. If "exercise_sessions" is
+empty, don't assume they skipped anything — just don't reference adherence.
 Use the "trends" data (week_avg, month_avg, and week-over-week trend) to give
 context — e.g. "your steps are up 12% vs last week" or "resting HR is steady
 against your monthly average". This shows you understand the user's patterns.
@@ -118,6 +124,28 @@ def build_daily_snapshot(user_id: str) -> dict:
             "efficiency": row["efficiency"],
             "score": row["score"],
         })
+
+    # Fetch exercise sessions (actual workouts, for plan-adherence feedback)
+    with db.connect() as conn:
+        exercise_rows = conn.execute(
+            """
+            SELECT start, end, activity_type, stats_json
+            FROM exercise_sessions
+            WHERE user_id = ? AND start >= ?
+            ORDER BY start DESC
+            """,
+            (user_id, (today - timedelta(days=days_back)).isoformat()),
+        ).fetchall()
+
+    snapshot["exercise_sessions"] = [
+        {
+            "start": row["start"],
+            "end": row["end"],
+            "activity_type": row["activity_type"],
+            "duration_min": _session_minutes(row["start"], row["end"]),
+        }
+        for row in exercise_rows
+    ]
 
     # Load coach memory for personalization
     with db.connect() as conn:
@@ -204,6 +232,15 @@ def _extract_metric_value(data_type: str, value: dict) -> dict | None:
         if x is not None:
             return {"breaths_per_min": x}
     return None
+
+
+def _session_minutes(start_str: str, end_str: str) -> float | None:
+    try:
+        start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        return round((end - start).total_seconds() / 60)
+    except (ValueError, TypeError):
+        return None
 
 
 def _summarize_sleep_stages(stages: list[dict]) -> dict:

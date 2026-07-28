@@ -606,6 +606,28 @@ def upsert_sleep_session(user_id: str, start: str, end: str, stages, efficiency=
         )
 
 
+def upsert_exercise_session(user_id: str, start: str, end: str, activity_type, stats) -> None:
+    with connect() as conn:
+        # Same rationale as sleep sessions: a session that grows as the
+        # tracker syncs keeps its start but moves its end, so remove any
+        # stored session overlapping this interval first to avoid a stale
+        # shorter duplicate under a different (start, end) PK.
+        conn.execute(
+            "DELETE FROM exercise_sessions WHERE user_id = ? AND start < ? AND end > ?",
+            (user_id, end, start),
+        )
+        conn.execute(
+            """
+            INSERT INTO exercise_sessions (user_id, start, end, activity_type, stats_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, start, end)
+            DO UPDATE SET activity_type = excluded.activity_type,
+                          stats_json = excluded.stats_json
+            """,
+            (user_id, start, end, activity_type, json.dumps(stats)),
+        )
+
+
 def map_log_message(message_id: str, user_id: str, insight_rowid: int) -> None:
     """Remember which food_log a sent LINE message confirms, so a later
     quote-REPLY to that message can target exactly that log."""

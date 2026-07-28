@@ -100,6 +100,38 @@ def sync_sleep(user_id: str, client: HealthClient, start_date: str, end_date: st
     log.info("synced sleep: %d sessions", len(sessions))
 
 
+def sync_exercise(user_id: str, client: HealthClient, start_date: str, end_date: str) -> None:
+    """Sync exercise sessions using the list endpoint, mirroring sync_sleep()."""
+    filter_str = (
+        f'exercise.interval.civil_end_time >= "{start_date}" '
+        f'AND exercise.interval.civil_end_time < "{end_date}"'
+    )
+    try:
+        sessions = client.list_points("exercise", filter_str)
+    except HealthAPIError as e:
+        log.warning("exercise list failed: %s", e)
+        db.log_sync(user_id, "exercise", ok=False, detail=str(e))
+        return
+
+    for session in sessions:
+        ex_data = session.get("exercise", session)
+        interval = ex_data.get("interval", {})
+        start = interval.get("startTime") or ""
+        end = interval.get("endTime") or ""
+        if not (start and end):
+            log.warning("exercise session missing start/end, skipping: %s", session)
+            continue
+        # Field name for the activity label is unverified (no live token was
+        # available to confirm it) — try likely candidates and log the raw
+        # keys on a miss so the first live sync reveals the real one.
+        activity_type = ex_data.get("activityType") or ex_data.get("exerciseType") or ex_data.get("type")
+        if activity_type is None:
+            log.info("exercise session has no recognized activity-type field: %s", list(ex_data.keys()))
+        db.upsert_exercise_session(user_id, str(start), str(end), activity_type, ex_data)
+    db.log_sync(user_id, "exercise", ok=True, detail=f"{len(sessions)} sessions")
+    log.info("synced exercise: %d sessions", len(sessions))
+
+
 def sync_list_types(user_id: str, client: HealthClient, start_date: str, end_date: str) -> None:
     """Sync data types that only support list (not dailyRollUp)."""
     for data_type in LIST_TYPES:
@@ -153,6 +185,7 @@ def run_sync(user_id: str) -> None:
     sync_daily_rollups(user_id, client, start_date, end_date)
     sync_list_types(user_id, client, start_date, end_date)
     sync_sleep(user_id, client, start_date, end_date)
+    sync_exercise(user_id, client, start_date, end_date)
     log.info("sync complete (%s .. %s)", start_date, end_date)
 
 
@@ -181,9 +214,10 @@ def run_backfill(user_id: str, days: int = 90) -> None:
         sync_daily_rollups(user_id, client, cursor.isoformat(), chunk_end.isoformat())
         cursor = chunk_end
 
-    # list + sleep in a single wide range
+    # list + sleep + exercise in a single wide range
     sync_list_types(user_id, client, start.isoformat(), end.isoformat())
     sync_sleep(user_id, client, start.isoformat(), end.isoformat())
+    sync_exercise(user_id, client, start.isoformat(), end.isoformat())
 
     log.info("backfill complete (%d days)", days)
 
