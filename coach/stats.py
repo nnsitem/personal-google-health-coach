@@ -46,11 +46,55 @@ def _azm(v: dict):
     )
 
 
+def _pick(d: dict, *keys: str):
+    """Return the first present field among candidate names, or None."""
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
+def _hrv(v: dict):
+    # Field name is unverified (see LIST_TYPES comment in sync.py) — try the
+    # documented/likely candidates and log the raw keys if none match, so the
+    # first live sync reveals the actual field name.
+    nested = v.get("dailyHeartRateVariability", {})
+    x = _pick(nested, "rmssdMillis", "hrvMillis", "millis")
+    if x is not None:
+        return float(x)
+    if nested:
+        log.info("unrecognized daily-heart-rate-variability shape: %s", list(nested.keys()))
+    return None
+
+
+def _spo2(v: dict):
+    nested = v.get("dailyOxygenSaturation", {})
+    x = _pick(nested, "percentage", "spo2Percentage", "oxygenSaturationPercentage", "percent")
+    if x is not None:
+        return float(x)
+    if nested:
+        log.info("unrecognized daily-oxygen-saturation shape: %s", list(nested.keys()))
+    return None
+
+
+def _resp_rate(v: dict):
+    nested = v.get("dailyRespiratoryRate", {})
+    x = _pick(nested, "breathsPerMinute", "respirationsPerMinute", "rate")
+    if x is not None:
+        return float(x)
+    if nested:
+        log.info("unrecognized daily-respiratory-rate shape: %s", list(nested.keys()))
+    return None
+
+
 _EXTRACTORS = {
     "steps": _steps,
     "total-calories": _calories,
     "daily-resting-heart-rate": _resting_hr,
     "active-zone-minutes": _azm,
+    "daily-heart-rate-variability": _hrv,
+    "daily-oxygen-saturation": _spo2,
+    "daily-respiratory-rate": _resp_rate,
 }
 
 
@@ -173,6 +217,86 @@ def _sleep_series(user_id: str, days: int) -> dict[str, float]:
     return out
 
 
+def _pct_dev(value: float | None, baseline: float | None) -> float | None:
+    if value is None or not baseline:
+        return None
+    return (value - baseline) / baseline * 100
+
+
+def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float]) -> dict | None:
+    """Combine resting-HR, HRV, sleep (+ SpO2/respiratory-rate anomaly checks)
+    into a recovery verdict, comparing today/yesterday against a trailing
+    30-day baseline (excluding the last 2 days so an off night doesn't skew
+    its own baseline).
+
+    Degrades gracefully: HRV/SpO2/respiratory-rate rows may not exist yet
+    (unverified data-type strings, see sync.py LIST_TYPES) — the score is
+    computed from whichever signals are actually present.
+    """
+    today = datetime.now(TZ).date()
+    yesterday = today - timedelta(days=1)
+    t_iso, y_iso = today.isoformat(), yesterday.isoformat()
+
+    def latest_and_baseline(day_map: dict[str, float]) -> tuple[float | None, float | None]:
+        latest = day_map.get(t_iso)
+        if latest is None:
+            latest = day_map.get(y_iso)
+        return latest, _window_avg(day_map, 30, 2)
+
+    signals: dict = {}
+    contributions: list[float] = []
+    anomalies: list[str] = []
+
+    rhr_latest, rhr_base = latest_and_baseline(series.get("daily-resting-heart-rate", {}))
+    if rhr_latest is not None and rhr_base:
+        dev = _pct_dev(rhr_latest, rhr_base)
+        signals["resting_hr"] = {"latest": rhr_latest, "baseline": round(rhr_base, 1), "pct_vs_baseline": round(dev, 1)}
+        contributions.append(-dev)  # lower resting HR than baseline = better recovery
+
+    hrv_latest, hrv_base = latest_and_baseline(series.get("daily-heart-rate-variability", {}))
+    if hrv_latest is not None and hrv_base:
+        dev = _pct_dev(hrv_latest, hrv_base)
+        signals["hrv"] = {"latest": hrv_latest, "baseline": round(hrv_base, 1), "pct_vs_baseline": round(dev, 1)}
+        contributions.append(dev * 1.5)  # HRV is the strongest recovery signal, weighted higher
+
+    sleep_latest, sleep_base = latest_and_baseline(sleep_map)
+    if sleep_latest is not None and sleep_base:
+        dev = _pct_dev(sleep_latest, sleep_base)
+        signals["sleep_hours"] = {"latest": sleep_latest, "baseline": round(sleep_base, 1), "pct_vs_baseline": round(dev, 1)}
+        contributions.append(dev * 1.2)
+
+    spo2_latest, spo2_base = latest_and_baseline(series.get("daily-oxygen-saturation", {}))
+    if spo2_latest is not None and spo2_base:
+        signals["spo2"] = {"latest": spo2_latest, "baseline": round(spo2_base, 1)}
+        if spo2_latest - spo2_base <= -2:
+            anomalies.append("spo2_drop")
+
+    resp_latest, resp_base = latest_and_baseline(series.get("daily-respiratory-rate", {}))
+    if resp_latest is not None and resp_base:
+        dev = _pct_dev(resp_latest, resp_base)
+        signals["respiratory_rate"] = {"latest": resp_latest, "baseline": round(resp_base, 1), "pct_vs_baseline": round(dev, 1)}
+        if dev is not None and dev >= 12:
+            anomalies.append("resp_rate_elevated")
+
+    if not contributions and not anomalies:
+        return None
+
+    score = round(max(-100.0, min(100.0, sum(contributions) / len(contributions)))) if contributions else None
+
+    if anomalies:
+        verdict = "possible fatigue/illness signal — consider an easier day"
+    elif score is None:
+        verdict = None
+    elif score >= 15:
+        verdict = "well recovered"
+    elif score <= -15:
+        verdict = "under-recovered — consider easing up today"
+    else:
+        verdict = "normal recovery"
+
+    return {"score": score, "verdict": verdict, "signals": signals, "anomalies": anomalies}
+
+
 def build_trends(user_id: str) -> dict:
     """Build a compact multi-window summary with today, yesterday, weekly and
     monthly averages, and week-over-week trends for each metric.
@@ -189,6 +313,9 @@ def build_trends(user_id: str) -> dict:
         "total-calories": "calories_kcal",
         "daily-resting-heart-rate": "resting_hr",
         "active-zone-minutes": "active_zone_min",
+        "daily-heart-rate-variability": "hrv_ms",
+        "daily-oxygen-saturation": "spo2_pct",
+        "daily-respiratory-rate": "resp_rate_bpm",
     }
 
     for dt, key in labels.items():
@@ -213,6 +340,8 @@ def build_trends(user_id: str) -> dict:
         "month_avg": _window_avg(sleep_map, 30, 0),
         "trend": _trend(this_week_sleep, last_week_sleep),
     }
+
+    out["readiness"] = _readiness(series, sleep_map)
 
     return out
 

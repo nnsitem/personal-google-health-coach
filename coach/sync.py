@@ -26,8 +26,17 @@ DAILY_ROLLUP_TYPES = [
 ]
 
 # Data types that only support list/reconcile (not dailyRollUp)
+# The HRV/SpO2/respiratory-rate strings are Google's documented v4 names but
+# are UNVERIFIED against a live account (no working token was available to
+# probe with at the time these were added — see DESIGN-V2.md §13 item 1).
+# sync_list_types() already logs+skips per-type HealthAPIErrors, so a wrong
+# string here just produces a warning in the logs rather than breaking sync;
+# check the logs after the first live deploy and correct the string if needed.
 LIST_TYPES = [
     "daily-resting-heart-rate",
+    "daily-heart-rate-variability",
+    "daily-oxygen-saturation",
+    "daily-respiratory-rate",
 ]
 
 

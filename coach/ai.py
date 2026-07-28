@@ -24,10 +24,10 @@ Guidelines:
 
 Formatting rules (LINE does NOT support markdown/bold/italic):
 - Start with a greeting emoji line (e.g. 🌅 Good morning!)
-- Use emoji as section headers on their own line:
+- Use emoji as section headers on their own line, IN THIS ORDER:
+  ❤️ Recovery
   🛌 Sleep
   🚶 Activity
-  ❤️ Recovery
   🎯 Today's Focus
 - Use「」to highlight key numbers (e.g. 「7,904 steps」)
 - One blank line between sections
@@ -41,6 +41,15 @@ If "todays_workout" is present in the snapshot, mention it in the 🎯 Today's F
 Use the "trends" data (week_avg, month_avg, and week-over-week trend) to give
 context — e.g. "your steps are up 12% vs last week" or "resting HR is steady
 against your monthly average". This shows you understand the user's patterns.
+
+The ❤️ Recovery section comes right after the greeting and leads with
+"trends.readiness.verdict" if it is present and non-null (e.g. "well
+recovered", "under-recovered — consider easing up today", or a possible
+fatigue/illness signal) — state it plainly as today's recovery verdict, then
+briefly cite whichever of "trends.readiness.signals" are present (hrv,
+resting_hr, sleep_hours, spo2, respiratory_rate) that explain it. If
+"trends.readiness" is null or has no verdict, omit the ❤️ Recovery section
+entirely for today rather than guessing.
 """
 
 
@@ -179,6 +188,21 @@ def _extract_metric_value(data_type: str, value: dict) -> dict | None:
         bpm = rhr_data.get("beatsPerMinute")
         if bpm:
             return {"bpm": int(bpm)}
+    elif data_type == "daily-heart-rate-variability":
+        from coach.stats import _hrv
+        x = _hrv(value)
+        if x is not None:
+            return {"rmssd_ms": x}
+    elif data_type == "daily-oxygen-saturation":
+        from coach.stats import _spo2
+        x = _spo2(value)
+        if x is not None:
+            return {"percent": x}
+    elif data_type == "daily-respiratory-rate":
+        from coach.stats import _resp_rate
+        x = _resp_rate(value)
+        if x is not None:
+            return {"breaths_per_min": x}
     return None
 
 
