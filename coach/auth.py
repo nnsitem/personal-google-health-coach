@@ -28,12 +28,19 @@ def run_auth_flow() -> None:
     flow = InstalledAppFlow.from_client_secrets_file(
         str(GOOGLE_CLIENT_SECRET_FILE), scopes=GOOGLE_HEALTH_SCOPES
     )
-    # When running in Docker, bind to 0.0.0.0 so the port-mapped redirect
-    # can reach the server. Detect via COACH_DATA_DIR=/app/data (set in Dockerfile).
+    # `host` is used to build the redirect_uri Google sees — must stay
+    # localhost/127.0.0.1, since Google's OAuth policy rejects 0.0.0.0 there
+    # ("Error 400: invalid_request"). `bind_addr` is the separate, actual
+    # socket bind address: when running in Docker (detected via
+    # COACH_DATA_DIR=/app/data, set in the Dockerfile) it must be 0.0.0.0 so
+    # the port-mapped redirect can actually reach the server — binding to
+    # localhost/127.0.0.1 inside the container isn't reachable from the host
+    # via `-p 8765:8765`.
     import os
-    host = "0.0.0.0" if os.environ.get("COACH_DATA_DIR") == "/app/data" else "localhost"
+    in_docker = os.environ.get("COACH_DATA_DIR") == "/app/data"
     creds = flow.run_local_server(
-        host=host, port=8765, open_browser=False,
+        host="localhost", bind_addr="0.0.0.0" if in_docker else None, port=8765,
+        open_browser=False,
         authorization_prompt_message="\nOpen this URL in your browser:\n{url}\n",
     )
     GOOGLE_TOKEN_FILE.write_text(creds.to_json())
