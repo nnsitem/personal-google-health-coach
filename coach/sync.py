@@ -101,10 +101,15 @@ def sync_sleep(user_id: str, client: HealthClient, start_date: str, end_date: st
 
 
 def sync_exercise(user_id: str, client: HealthClient, start_date: str, end_date: str) -> None:
-    """Sync exercise sessions using the list endpoint, mirroring sync_sleep()."""
+    """Sync exercise sessions using the list endpoint, mirroring sync_sleep().
+
+    Filter field confirmed live: unlike sleep (civil_end_time), exercise only
+    accepts civil_start_time — civil_end_time/start_time/end_time all 400
+    with INVALID_DATA_POINT_FILTER_DATA_TYPE_MEMBER.
+    """
     filter_str = (
-        f'exercise.interval.civil_end_time >= "{start_date}" '
-        f'AND exercise.interval.civil_end_time < "{end_date}"'
+        f'exercise.interval.civil_start_time >= "{start_date}" '
+        f'AND exercise.interval.civil_start_time < "{end_date}"'
     )
     try:
         sessions = client.list_points("exercise", filter_str)
@@ -121,12 +126,10 @@ def sync_exercise(user_id: str, client: HealthClient, start_date: str, end_date:
         if not (start and end):
             log.warning("exercise session missing start/end, skipping: %s", session)
             continue
-        # Field name for the activity label is unverified (no live token was
-        # available to confirm it) — try likely candidates and log the raw
-        # keys on a miss so the first live sync reveals the real one.
-        activity_type = ex_data.get("activityType") or ex_data.get("exerciseType") or ex_data.get("type")
-        if activity_type is None:
-            log.info("exercise session has no recognized activity-type field: %s", list(ex_data.keys()))
+        # displayName ("Strength Training") is more useful to the coach than
+        # the raw exerciseType enum ("STRENGTH_TRAINING") — confirmed live
+        # that activityType never exists on this data type.
+        activity_type = ex_data.get("displayName") or ex_data.get("exerciseType")
         db.upsert_exercise_session(user_id, str(start), str(end), activity_type, ex_data)
     db.log_sync(user_id, "exercise", ok=True, detail=f"{len(sessions)} sessions")
     log.info("synced exercise: %d sessions", len(sessions))
