@@ -220,7 +220,7 @@ def _extract_metric_value(data_type: str, value: dict) -> dict | None:
         from coach.stats import _hrv
         x = _hrv(value)
         if x is not None:
-            return {"rmssd_ms": x}
+            return {"avg_hrv_ms": x}
     elif data_type == "daily-oxygen-saturation":
         from coach.stats import _spo2
         x = _spo2(value)

@@ -55,11 +55,13 @@ def _pick(d: dict, *keys: str):
 
 
 def _hrv(v: dict):
-    # Field name is unverified (see LIST_TYPES comment in sync.py) — try the
-    # documented/likely candidates and log the raw keys if none match, so the
-    # first live sync reveals the actual field name.
+    # Confirmed live from Mac mini sync logs 2026-07-30: real keys are
+    # ['date', 'averageHeartRateVariabilityMilliseconds', 'entropy',
+    # 'noRemSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds',
+    # 'deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds'] — none of
+    # the originally-guessed names (rmssdMillis/hrvMillis/millis) existed.
     nested = v.get("dailyHeartRateVariability", {})
-    x = _pick(nested, "rmssdMillis", "hrvMillis", "millis")
+    x = _pick(nested, "averageHeartRateVariabilityMilliseconds")
     if x is not None:
         return float(x)
     if nested:
@@ -68,8 +70,12 @@ def _hrv(v: dict):
 
 
 def _spo2(v: dict):
+    # Confirmed live from Mac mini sync logs 2026-07-30: real keys are
+    # ['date', 'averagePercentage', 'lowerBoundPercentage',
+    # 'upperBoundPercentage', 'standardDeviationPercentage'] — none of the
+    # originally-guessed names existed.
     nested = v.get("dailyOxygenSaturation", {})
-    x = _pick(nested, "percentage", "spo2Percentage", "oxygenSaturationPercentage", "percent")
+    x = _pick(nested, "averagePercentage")
     if x is not None:
         return float(x)
     if nested:
