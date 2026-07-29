@@ -29,7 +29,11 @@ GOOGLE_HEALTH_SCOPES = [
 # LINE Messaging API
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-# LINE_USER_ID removed in v2 — user identity is now per-user in the DB
+# Per-user LINE_USER_ID check was removed in v2 — user identity is now per-user
+# in the DB. The env var is kept as the owner's own id, repurposed as the
+# recipient for infra-level alerts (e.g. coach.watchdog's auto-restart
+# notifications) that aren't tied to any particular user.
+ADMIN_LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 TZ = ZoneInfo(os.environ.get("TZ", "UTC"))
 

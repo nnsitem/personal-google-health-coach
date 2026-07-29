@@ -1,6 +1,7 @@
 services:
   coach:
     build: .
+    container_name: coach
     restart: unless-stopped
     env_file: .env
     volumes:
@@ -17,13 +18,37 @@ services:
   # Cloudflare Tunnel — exposes the LINE webhook over HTTPS with a stable URL.
   # Requires CLOUDFLARE_TUNNEL_TOKEN in .env and a tunnel route in the Cloudflare
   # dashboard pointing your hostname (e.g. coach.signagegold.co) at http://coach:8080.
-  # Start both services with:  docker compose --profile webhook up -d --build
+  # Start all three webhook-profile services with:
+  #   docker compose --profile webhook up -d --build
   tunnel:
     image: cloudflare/cloudflared:latest
+    container_name: tunnel
     restart: unless-stopped
-    command: tunnel run
+    # --metrics exposes cloudflared's own /ready endpoint (200 once a
+    # connector is registered, else non-200) — coach.watchdog polls this to
+    # detect a silently-disconnected tunnel (see docker-compose.yml watchdog
+    # service and coach/watchdog.py for why this is needed).
+    command: tunnel --metrics 0.0.0.0:60123 run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
     depends_on:
       - coach
+    profiles: ["webhook"]
+
+  # Restarts coach/tunnel automatically if either stays "Up" but stops
+  # actually working (e.g. the tunnel silently loses its connection, as
+  # happened 2026-07-28 and needed a manual restart) — restart:
+  # unless-stopped alone only recovers a container that fully exits. See
+  # coach/watchdog.py for the health-check + restart + LINE-notify logic.
+  # Requires ADMIN_LINE_USER_ID (LINE_USER_ID in .env) to send notifications.
+  watchdog:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: python -m coach.watchdog
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - coach
+      - tunnel
     profiles: ["webhook"]

@@ -101,3 +101,20 @@ sqlite3 data/coach.db 'SELECT day, data_type, source FROM metrics ORDER BY day D
 - Set Docker Desktop (or OrbStack) to start at login; `restart: unless-stopped` handles reboots.
 - Prevent sleep: `sudo pmset -a sleep 0` (or Energy settings → prevent automatic sleeping).
 - Back up `./data/` — it is the only stateful thing.
+- These cover the machine being *off*. They don't cover a container staying `Up` but going functionally
+  dead (e.g. the Cloudflare Tunnel silently losing its connection) — see `watchdog` below for that case.
+
+## Self-healing watchdog
+
+The `watchdog` service (part of the `webhook` profile, alongside `tunnel`) polls `coach`'s `/healthz`
+and `tunnel`'s cloudflared `/ready` endpoint every 30s and restarts either container via the Docker
+Engine API after 3 consecutive failures (~90s) — this is the gap `restart: unless-stopped` leaves,
+since that policy only recovers a container that actually *exits*, not one that stays `Up` but stops
+responding. It notifies `LINE_USER_ID` (repurposed as the admin/owner recipient in v2 — see `.env.example`)
+over LINE when it restarts something.
+
+Tunables (all optional, set in `.env`): `WATCHDOG_INTERVAL_SECONDS` (default 30), `WATCHDOG_FAILURE_THRESHOLD`
+(default 3), `WATCHDOG_RESTART_COOLDOWN_SECONDS` (default 600 — won't re-restart the same container more
+often than this), `WATCHDOG_START_GRACE_SECONDS` (default 60 — failures don't count until this long after
+the watchdog itself, or that container, last started/restarted, so a normal cold start isn't mistaken for
+a hang).
