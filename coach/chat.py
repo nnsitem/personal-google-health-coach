@@ -483,8 +483,15 @@ def handle_message(user_id: str, user_text: str,
                 if rowid is not None:
                     created_rowids.append(rowid)
         except Exception:
+            # log_food_to_health/log_hydration_to_health already turn any
+            # write failure (HealthAPIError or otherwise) into a clean
+            # (False, None) — reaching here means something else broke (e.g.
+            # a local DB write). Must still be a clear, localized message:
+            # a bare "⚠️" reads as decorative and gives no indication that
+            # nothing was actually saved.
             log.exception("failed to process chat %s directive", kind)
-            status = "⚠️"
+            from coach.food import LABELS, _lang_code
+            status = LABELS.get(_lang_code(db.get_user_language(user_id)), LABELS["en"])["not_synced"]
         if status:
             reply = reply + "\n\n" + status
 

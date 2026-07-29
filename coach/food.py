@@ -314,6 +314,13 @@ def log_food_to_health(user_id: str, analysis: dict) -> tuple[bool, str | None]:
     except HealthAPIError as e:
         log.error("failed to write nutrition-log to Google Health: %s", e)
         return False, None
+    except Exception:
+        # Anything other than HealthAPIError (token refresh errors, etc.) must
+        # still resolve to a clean (False, None) — letting it propagate means
+        # the caller's generic except falls back to a bare, uninformative
+        # "⚠️" instead of the real "couldn't save" message (see chat.py).
+        log.exception("unexpected error writing nutrition-log to Google Health")
+        return False, None
 
 
 def log_hydration_to_health(user_id: str, analysis: dict) -> tuple[bool, str | None]:
@@ -329,6 +336,9 @@ def log_hydration_to_health(user_id: str, analysis: dict) -> tuple[bool, str | N
         return True, (created or {}).get("name")
     except HealthAPIError as e:
         log.error("failed to write hydration-log to Google Health: %s", e)
+        return False, None
+    except Exception:
+        log.exception("unexpected error writing hydration-log to Google Health")
         return False, None
 
 
@@ -434,6 +444,9 @@ def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
             except HealthAPIError as e:
                 log.error("failed to delete stored points for adjustment: %s", e)
                 return False
+            except Exception:
+                log.exception("unexpected error deleting stored points for adjustment")
+                return False
         # Stored names existed but none parsed into a data type — e.g. rows
         # written by a prior bug that captured the API's Operation name
         # instead of the created DataPoint's name. Silently reporting success
@@ -527,6 +540,9 @@ def delete_today_logs(user_id: str, kind: str = "all") -> str:
         # Don't clear local history if Google Health still holds the points —
         # the two stores must not diverge.
         log.error("failed to clear today's %s logs: %s", kind, e)
+        return labels["delete_failed"]
+    except Exception:
+        log.exception("unexpected error clearing today's %s logs", kind)
         return labels["delete_failed"]
 
     # Clear matching local history rows for today (user-local midnight, UTC ts)
@@ -727,6 +743,9 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
     except HealthAPIError as e:
         log.error("failed to list %s for delete: %s", data_type, e)
         return None
+    except Exception:
+        log.exception("unexpected error listing %s for delete", data_type)
+        return None
 
     if not points:
         return None
@@ -751,6 +770,9 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
         return label
     except HealthAPIError as e:
         log.error("failed to delete %s: %s", data_type, e)
+        return None
+    except Exception:
+        log.exception("unexpected error deleting %s", data_type)
         return None
 
 
