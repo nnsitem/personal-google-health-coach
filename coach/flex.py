@@ -116,12 +116,13 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
          "wrap": True, "color": TEXT_DARK, "margin": "xs"},
         {
             "type": "box",
-            "layout": "baseline",
+            "layout": "horizontal",
             "margin": "md",
             "contents": [
                 {
                     "type": "box",
                     "layout": "vertical",
+                    "flex": 0,
                     "backgroundColor": accent_color,
                     "cornerRadius": "8px",
                     "paddingAll": "6px",
