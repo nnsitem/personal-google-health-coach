@@ -10,7 +10,7 @@ two-way chat, and adaptive workout plans + weekly reports.
 ## Features
 
 - **Hourly sync** of steps, calories, resting heart rate, active-zone minutes, and sleep
-- **Daily brief** (7:30am) — AI coaching message with sleep, activity, recovery, and today's focus
+- **Daily brief** (10:00am) — AI coaching message with sleep, activity, recovery, and today's focus
 - **Nudges** — rule-triggered reminders (low steps, streaks, high resting HR, bedtime), rate-limited with quiet hours
 - **Two-way chat** — ask the coach anything on LINE; it answers using your real data, remembers goals and preferences
 - **Workout plans** — ask the coach to build a multi-week plan; it's saved and referenced in daily briefs
@@ -71,7 +71,7 @@ Register the webhook URL `https://<your-host>/webhook` in the LINE Developers co
 |-----|------|
 | Health sync | hourly at :05 |
 | Nudge check | hourly at :35 (quiet hours 22:00–07:00 in the user's local time) |
-| Daily brief | 7:30am in the user's local time |
+| Daily brief | 10:00am in the user's local time |
 | Weekly report | Sunday 9:00am in the user's local time |
 
 ## Smoke tests

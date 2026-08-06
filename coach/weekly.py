@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
-from coach.line import send_text, LineError
+from coach.flex import build_report_bubble, COLOR_WEEKLY
+from coach.line import send_messages, flex_message, LineError
 from coach.sync import run_sync
 
 log = logging.getLogger(__name__)
@@ -182,7 +183,8 @@ def run_weekly_report(user_id: str) -> str:
     log.info("weekly report generated (%d chars)", len(message))
 
     try:
-        send_text(message, to=user_id)
+        bubble = build_report_bubble("Weekly Report", "📊", COLOR_WEEKLY, message)
+        send_messages([flex_message("📊 Your weekly health report is ready", bubble)], to=user_id)
         log.info("weekly report sent via LINE")
         with db.connect() as conn:
             conn.execute(

@@ -17,6 +17,7 @@ from google import genai
 from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
+from coach.flex import FlexReply, build_log_bubble
 from coach.health_api import HealthAPIError, client_for_user
 
 log = logging.getLogger(__name__)
@@ -356,15 +357,17 @@ def _store_food_log(user_id: str, analysis: dict, synced: bool) -> int:
         return cur.lastrowid
 
 
-def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str, int | None]:
+def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str | FlexReply, int | None]:
     """Log a food/drink the user DESCRIBED in chat (no photo).
 
     `analysis` is the JSON the chat model emitted in a [LOG_FOOD]/[LOG_DRINK]
     directive — same shape as the vision output, plus optional meal_type /
-    time / date fields. Returns (status_line, insights_rowid_or_None): the
-    localized status is appended to the coach's reply so the visible
-    confirmation reflects whether the Google Health write actually happened,
-    and the rowid lets the caller map the sent message for quote-replies.
+    time / date fields. Returns (reply, insights_rowid_or_None): reply is a
+    FlexReply (log confirmation card, no hero image since there's no photo)
+    when a real log was created, or a plain str status line for
+    apology/error cases. The caller sends FlexReply as its own message and
+    a plain str appended to the conversational reply text. The rowid lets
+    the caller map the sent message for quote-replies.
     """
     db.init_db()
     labels = LABELS.get(_lang_code(_get_language(user_id)), LABELS["en"])
@@ -403,8 +406,38 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str,
             synced_hydration,
         )
         if synced_hydration and synced_nutrition:
-            return labels["synced_drink"] + " + " + labels["synced_food"], rowid
-        return (labels["synced_drink"] if synced_hydration else labels["not_synced"]), rowid
+            sync_label = labels["synced_drink"] + " + " + labels["synced_food"]
+        elif synced_hydration:
+            sync_label = labels["synced_drink"]
+        else:
+            sync_label = labels["not_synced"]
+
+        name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
+        ml = round(float(analysis.get("volume_ml") or 0))
+        cal = round(float(analysis.get("calories_kcal") or 0))
+        protein = round(float(analysis.get("protein_g") or 0))
+        carbs = round(float(analysis.get("total_carbohydrate_g") or 0))
+        fat = round(float(analysis.get("total_fat_g") or 0))
+        count = int(float(analysis.get("container_count") or 1))
+
+        rows = []
+        if count > 1:
+            rows.append((labels["containers"], str(count)))
+        rows.append((labels["volume"], f"{ml} ml"))
+        if cal > 0:
+            rows.append((labels["energy"], f"{cal} kcal"))
+        if protein > 0:
+            rows.append((labels["protein"], f"{protein} g"))
+        if carbs > 0:
+            rows.append((labels["carbs"], f"{carbs} g"))
+        if fat > 0:
+            rows.append((labels["fat"], f"{fat} g"))
+
+        bubble = build_log_bubble(
+            name=name, emoji="💧", rows=rows, notes=analysis.get("notes"),
+            synced=synced_hydration or synced_nutrition, sync_label=sync_label,
+        )
+        return FlexReply(f"💧 {name}", bubble), rowid
 
     if round(analysis.get("calories_kcal") or 0) <= 0:
         return labels["empty_food"], None
@@ -415,7 +448,23 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str,
          "health_point_names": [n for n in (point_name,) if n]},
         synced,
     )
-    return (labels["synced_food"] if synced else labels["not_synced"]), rowid
+
+    name = analysis.get("food_name_local") or analysis.get("food_name_en") or "meal"
+    cal = round(float(analysis.get("calories_kcal") or 0))
+    protein = round(float(analysis.get("protein_g") or 0))
+    carbs = round(float(analysis.get("total_carbohydrate_g") or 0))
+    fat = round(float(analysis.get("total_fat_g") or 0))
+    rows = [
+        (labels["energy"], f"{cal} kcal"),
+        (labels["protein"], f"{protein} g"),
+        (labels["carbs"], f"{carbs} g"),
+        (labels["fat"], f"{fat} g"),
+    ]
+    bubble = build_log_bubble(
+        name=name, emoji="🍽️", rows=rows, notes=analysis.get("notes"),
+        synced=synced, sync_label=labels["synced_food"] if synced else labels["not_synced"],
+    )
+    return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
 
 def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
@@ -833,13 +882,16 @@ LABELS = {
 
 
 def handle_food_photo(user_id: str, image_bytes: bytes,
-                      mime_type: str = "image/jpeg") -> tuple[str, int | None]:
+                      mime_type: str = "image/jpeg") -> tuple[str | FlexReply, int | None]:
     """Full flow: analyze image → log to Google Health → return a LINE reply.
 
     Handles both food (nutrition-log) and drinks (hydration-log).
     Reply language follows the user's stored preference.
-    Returns (reply_text, insights_rowid_or_None) — the rowid lets the caller
-    map the sent confirmation message for later quote-replies.
+    Returns (reply, insights_rowid_or_None) — reply is a FlexReply (a log
+    confirmation card, with the analyzed photo as its hero image) when the
+    analysis produced a real log, or a plain str for apology/error cases
+    (unclear photo, empty portion, AI unavailable). The rowid lets the
+    caller map the sent confirmation message for later quote-replies.
     """
     db.init_db()
 
@@ -855,12 +907,20 @@ def handle_food_photo(user_id: str, image_bytes: bytes,
     if not analysis or analysis.get("type") not in ("food", "drink"):
         return labels["unclear"], None
 
+    image_url = None
+    try:
+        from coach.images import save_temp_image, temp_image_url
+        image_url = temp_image_url(save_temp_image(image_bytes, mime_type))
+    except Exception:
+        log.exception("failed to save temp image for flex hero — continuing without it")
+
     if analysis["type"] == "drink":
-        return _handle_drink(user_id, analysis, labels)
-    return _handle_food(user_id, analysis, labels)
+        return _handle_drink(user_id, analysis, labels, image_url=image_url)
+    return _handle_food(user_id, analysis, labels, image_url=image_url)
 
 
-def _handle_food(user_id: str, analysis: dict, labels: dict) -> tuple[str, int | None]:
+def _handle_food(user_id: str, analysis: dict, labels: dict,
+                 image_url: str | None = None) -> tuple[str | FlexReply, int | None]:
     cal = round(float(analysis.get("calories_kcal") or 0))
 
     # Don't log if there's no real portion (e.g. empty plate / not food)
@@ -882,26 +942,25 @@ def _handle_food(user_id: str, analysis: dict, labels: dict) -> tuple[str, int |
     fat = round(float(analysis.get("total_fat_g") or 0))
     confidence = analysis.get("confidence", "medium")
 
-    lines = [
-        f"🍽️ {name}",
-        "",
-        f"{labels['energy']}: 「{cal} kcal」",
-        f"{labels['protein']}: 「{protein} g」",
-        f"{labels['carbs']}: 「{carbs} g」",
-        f"{labels['fat']}: 「{fat} g」",
+    rows = [
+        (labels["energy"], f"{cal} kcal"),
+        (labels["protein"], f"{protein} g"),
+        (labels["carbs"], f"{carbs} g"),
+        (labels["fat"], f"{fat} g"),
     ]
-    if analysis.get("notes"):
-        lines.append("")
-        lines.append(f"📝 {analysis['notes']}")
-    lines.append("")
-    lines.append(labels["synced_food"] if synced else labels["not_synced"])
-    if confidence == "low":
-        lines.append(labels["low_conf"])
+    bubble = build_log_bubble(
+        name=name, emoji="🍽️", rows=rows,
+        notes=analysis.get("notes"),
+        synced=synced,
+        sync_label=labels["synced_food"] if synced else labels["not_synced"],
+        low_conf_label=labels["low_conf"] if confidence == "low" else None,
+        image_url=image_url,
+    )
+    return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
-    return "\n".join(lines), rowid
 
-
-def _handle_drink(user_id: str, analysis: dict, labels: dict) -> tuple[str, int | None]:
+def _handle_drink(user_id: str, analysis: dict, labels: dict,
+                  image_url: str | None = None) -> tuple[str | FlexReply, int | None]:
     ml = round(float(analysis.get("volume_ml") or 0))
 
     # Don't log an empty container
@@ -939,35 +998,35 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict) -> tuple[str, int 
     confidence = analysis.get("confidence", "medium")
 
     count = int(float(analysis.get("container_count") or 1))
-    lines = [
-        f"💧 {name}",
-        "",
-    ]
+    rows = []
     if count > 1:
-        lines.append(f"{labels['containers']}: 「{count}」")
-    lines.append(f"{labels['volume']}: 「{ml} ml」")
+        rows.append((labels["containers"], str(count)))
+    rows.append((labels["volume"], f"{ml} ml"))
     if cal > 0:
-        lines.append(f"{labels['energy']}: 「{cal} kcal」")
+        rows.append((labels["energy"], f"{cal} kcal"))
     if protein > 0:
-        lines.append(f"{labels['protein']}: 「{protein} g」")
+        rows.append((labels["protein"], f"{protein} g"))
     if carbs > 0:
-        lines.append(f"{labels['carbs']}: 「{carbs} g」")
+        rows.append((labels["carbs"], f"{carbs} g"))
     if fat > 0:
-        lines.append(f"{labels['fat']}: 「{fat} g」")
-    if analysis.get("notes"):
-        lines.append("")
-        lines.append(f"📝 {analysis['notes']}")
-    lines.append("")
-    if synced_hydration and synced_nutrition:
-        lines.append(labels["synced_drink"] + " + " + labels["synced_food"])
-    elif synced_hydration:
-        lines.append(labels["synced_drink"])
-    else:
-        lines.append(labels["not_synced"])
-    if confidence == "low":
-        lines.append(labels["low_conf"])
+        rows.append((labels["fat"], f"{fat} g"))
 
-    return "\n".join(lines), rowid
+    if synced_hydration and synced_nutrition:
+        sync_label = labels["synced_drink"] + " + " + labels["synced_food"]
+    elif synced_hydration:
+        sync_label = labels["synced_drink"]
+    else:
+        sync_label = labels["not_synced"]
+
+    bubble = build_log_bubble(
+        name=name, emoji="💧", rows=rows,
+        notes=analysis.get("notes"),
+        synced=synced_hydration or synced_nutrition,
+        sync_label=sync_label,
+        low_conf_label=labels["low_conf"] if confidence == "low" else None,
+        image_url=image_url,
+    )
+    return FlexReply(f"💧 {name}", bubble), rowid
 
 
 if __name__ == "__main__":
@@ -981,4 +1040,9 @@ if __name__ == "__main__":
         sys.exit(1)
     with open(sys.argv[1], "rb") as f:
         img = f.read()
-    print(handle_food_photo(DEFAULT_USER_ID, img)[0])
+    reply, _ = handle_food_photo(DEFAULT_USER_ID, img)
+    if isinstance(reply, FlexReply):
+        print(reply.alt_text)
+        print(json.dumps(reply.bubble, indent=2, ensure_ascii=False))
+    else:
+        print(reply)

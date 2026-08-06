@@ -20,13 +20,16 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi.responses import FileResponse
+from linebot.v3.messaging import TextMessage
 
 from coach import db
 from coach.config import LINE_CHANNEL_SECRET, TZ
 from coach.config import DAILY_SUMMARY_HOUR, DAILY_SUMMARY_MINUTE
 from coach.chat import handle_message
+from coach.flex import FlexReply
 from coach.line import send_text as push_text
-from coach.line import reply_text, LineError
+from coach.line import reply_text, send_messages, reply_messages, flex_message, LineError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -124,6 +127,15 @@ def _safe_backfill_all() -> None:
             log.exception("backfill failed for user %s", uid)
 
 
+def _safe_image_cleanup() -> None:
+    """Prune temp meal/drink photos (served for Flex hero images) once stale."""
+    from coach.images import cleanup_old_images
+    try:
+        cleanup_old_images()
+    except Exception:
+        log.exception("temp image cleanup failed")
+
+
 # --- Lifespan ---------------------------------------------------------------
 
 @asynccontextmanager
@@ -150,6 +162,8 @@ async def lifespan(app: FastAPI):
         minute=0,
         id="weekly_report", misfire_grace_time=3000, coalesce=True,
     )
+    scheduler.add_job(_safe_image_cleanup, "cron", minute=50, id="image_cleanup",
+                      misfire_grace_time=3000, coalesce=True)
     scheduler.start()
     log.info(
         "scheduler started (sync at :05, nudges at :35, daily dispatch at :%02d "
@@ -168,6 +182,19 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "ts": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/images/{token}")
+async def serve_temp_image(token: str):
+    """Serves a temp meal/drink photo so it can sit as a Flex hero image —
+    LINE's servers need a public URL, and inbound photo bytes are otherwise
+    only ever in-memory (see coach/images.py). 404s for anything that isn't
+    exactly a token this process minted."""
+    from coach.images import resolve_temp_image
+    path = resolve_temp_image(token)
+    if not path:
+        return Response(status_code=404)
+    return FileResponse(path)
 
 
 # --- LINE Webhook -----------------------------------------------------------
@@ -223,6 +250,27 @@ def _send(user_id: str, text: str, reply_token: str | None = None) -> list[str]:
         except LineError as e:
             log.info("reply token unusable (%s) — falling back to push", e)
     return push_text(text, to=user_id).get("message_ids", [])
+
+
+def _to_line_message(payload):
+    """Convert a str or FlexReply into a line-bot-sdk Message object."""
+    if isinstance(payload, FlexReply):
+        return flex_message(payload.alt_text, payload.bubble)
+    return TextMessage(text=str(payload)[:5000])
+
+
+def _send_multi(user_id: str, payloads: list, reply_token: str | None = None) -> list[str]:
+    """Like _send, but for a list of str/FlexReply payloads sent as one LINE
+    message batch (a text reply plus any Flex log-confirmation cards)."""
+    messages = [_to_line_message(p) for p in payloads if p]
+    if not messages:
+        return []
+    if reply_token:
+        try:
+            return reply_messages(reply_token, messages).get("message_ids", [])
+        except LineError as e:
+            log.info("reply token unusable (%s) — falling back to push", e)
+    return send_messages(messages, to=user_id).get("message_ids", [])
 
 
 def _send_welcome(user_id: str, reply_token: str | None = None) -> None:
@@ -375,8 +423,8 @@ def _process_text_message(user_id: str, text: str, reply_token: str | None = Non
 
     # Pass to the chat agent
     try:
-        reply, log_rowids = handle_message(user_id, text, quoted_message_id=quoted_message_id)
-        sent_ids = _send(user_id, reply, reply_token)
+        reply, log_rowids, extra_flex = handle_message(user_id, text, quoted_message_id=quoted_message_id)
+        sent_ids = _send_multi(user_id, [reply, *extra_flex], reply_token)
         if inbound_message_id:
             sent_ids = sent_ids + [inbound_message_id]
         _map_sent_log(user_id, sent_ids, log_rowids)
@@ -478,12 +526,12 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
         image_bytes = get_image_content(message_id)
         mime = _detect_image_mime(image_bytes)
         reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
-        sent_ids = _send(user_id, reply, reply_token)
+        sent_ids = _send_multi(user_id, [reply], reply_token)
         # Map the coach's confirmation AND the user's own photo message — a
         # quote-reply to either should target this log.
         _map_sent_log(user_id, sent_ids + [message_id],
                       [log_rowid] if log_rowid is not None else [])
-        log.info("photo processed: %s", reply[:80])
+        log.info("photo processed (rowid=%s)", log_rowid)
     except Exception:
         log.exception("failed to handle photo")
         try:
@@ -564,8 +612,8 @@ async def chat_endpoint(request: Request):
     user_id = body.get("user_id", "U1068a1b9c15b44e7ff1439bdefdeb5dc")
     if not text:
         return {"error": "missing 'message' field"}
-    reply, _ = handle_message(user_id, text)
-    return {"reply": reply}
+    reply, _, extra_flex = handle_message(user_id, text)
+    return {"reply": reply, "flex": [f.bubble for f in extra_flex]}
 
 
 # --- Google OAuth web flow --------------------------------------------------

@@ -104,7 +104,7 @@ coach_memory(name, content, updated_at)                            -- long-term 
 
 | Google Health Coach feature | Our implementation |
 |---|---|
-| Proactive daily insights & nudges | Daily 7:30 am summary + hourly rule-triggered nudges (inactivity streak, unusually high resting HR, bedtime reminder if sleep debt) |
+| Proactive daily insights & nudges | Daily 10:00 am summary + hourly rule-triggered nudges (inactivity streak, unusually high resting HR, bedtime reminder if sleep debt) |
 | Readiness / recovery analysis | Computed from resting HR trend + sleep score + yesterday's load; explained by the coach in the daily message |
 | Sleep consistency & restorative-rest goals | Weekly consistency tracking (bed/wake time variance, deep+REM share vs. 7-day baseline) |
 | Tailored workouts & adaptive multi-week plans | `create_workout_plan` tool; daily loop checks plan adherence and the coach adjusts on feedback |
@@ -169,7 +169,7 @@ Design decisions that make this portable:
 
 ## 4. Message examples
 
-**Daily summary (7:30 am, template or free-form):**
+**Daily summary (10:00 am, template or free-form):**
 
 > 🌅 *Morning, Metis — here's your health brief*
 >
@@ -220,7 +220,7 @@ Swapping nudges + chat to Haiku 4.5 would bring it to ≈ $2/month, at reduced c
 | Phase | Deliverable | Scope |
 |---|---|---|
 | **1. Pipes** | Data flowing end to end | Google OAuth flow + hourly sync into SQLite; WhatsApp sandbox sending "hello" to your phone |
-| **2. Daily coach** | The core feature | Snapshot builder → Claude daily summary → 7:30 am WhatsApp delivery; `daily_health_summary` template approved |
+| **2. Daily coach** | The core feature | Snapshot builder → Claude daily summary → 10:00 am WhatsApp delivery; `daily_health_summary` template approved |
 | **3. Nudges** | Proactive coaching | Rule engine (inactivity, recovery, bedtime, streaks) + nudge generation + rate limiting |
 | **4. Chat** | Two-way coach | Webhook receiver, tool-runner agent with health-query/goal/memory tools, conversation history |
 | **5. Plans & trends** | Premium parity | Multi-week adaptive workout plans, weekly report (Sunday), sleep-consistency program; cycle/nutrition when API data types land (Q3 2026) |

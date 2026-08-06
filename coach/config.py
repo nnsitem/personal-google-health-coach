@@ -51,8 +51,8 @@ GEMINI_FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-pro-latest"]
 GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
 
 # Daily summary delivery time (local TZ)
-DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "7"))
-DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "30"))
+DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "10"))
+DAILY_SUMMARY_MINUTE = int(os.environ.get("DAILY_SUMMARY_MINUTE", "0"))
 
 # Trailing window re-fetched on every sync; device sync lag means data for
 # "yesterday" keeps changing, so we always re-read and upsert.

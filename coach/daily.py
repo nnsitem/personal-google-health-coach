@@ -1,15 +1,16 @@
 """Daily summary orchestrator: sync → generate → deliver via LINE.
 
 Run manually:  python -m coach.daily
-Also invoked by the scheduler at 7:30am local time.
+Also invoked by the scheduler at 10:00am local time.
 """
 
 import logging
 
 from coach import db
 from coach.ai import generate_daily_summary
+from coach.flex import build_report_bubble, COLOR_DAILY
 from coach.sync import run_sync
-from coach.line import send_text, LineError
+from coach.line import send_messages, flex_message, LineError
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +34,10 @@ def run_daily_summary(user_id: str) -> str:
     message = generate_daily_summary(user_id)
     log.info("daily summary generated (%d chars)", len(message))
 
-    # 3. Deliver via LINE
+    # 3. Deliver via LINE as a Flex report card
     try:
-        send_text(message, to=user_id)
+        bubble = build_report_bubble("Daily Brief", "🌅", COLOR_DAILY, message)
+        send_messages([flex_message("🌅 Your daily health brief is ready", bubble)], to=user_id)
         log.info("daily summary sent via LINE")
 
         # Mark as delivered

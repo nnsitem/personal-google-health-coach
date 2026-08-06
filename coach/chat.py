@@ -357,7 +357,7 @@ def _build_context_message(user_id: str) -> str:
 
 
 def handle_message(user_id: str, user_text: str,
-                   quoted_message_id: str | None = None) -> tuple[str, list[int]]:
+                   quoted_message_id: str | None = None) -> tuple[str, list[int], list]:
     """Process an inbound user message and generate a coach reply.
 
     quoted_message_id: LINE id of the message the user quote-replied to, if
@@ -365,8 +365,11 @@ def handle_message(user_id: str, user_text: str,
     the target for adjustments (instead of guessing "the last log").
 
     Stores both the user message and the reply in chat_messages.
-    Returns (reply_text, created_log_rowids) — the rowids let the caller map
-    the outgoing confirmation message for future quote-replies.
+    Returns (reply_text, created_log_rowids, extra_flex_replies) — the rowids
+    let the caller map the outgoing confirmation message for future
+    quote-replies; extra_flex_replies are FlexReply log-confirmation cards
+    (from food/drink logged in chat text) to send as their own messages
+    alongside reply_text.
     """
     db.init_db()
 
@@ -427,7 +430,7 @@ def handle_message(user_id: str, user_text: str,
     if not api_key:
         reply = "I'm not configured yet — GEMINI_API_KEY is missing."
         _save_chat_message(user_id, "coach", reply)
-        return reply, []
+        return reply, [], []
 
     try:
         # Shorter budget than scheduled jobs — a person is waiting in chat.
@@ -466,6 +469,7 @@ def handle_message(user_id: str, user_text: str,
     # Health and append the REAL save status (the model is told not to claim
     # success itself).
     created_rowids: list[int] = []
+    extra_flex: list = []
     for kind, analysis in chat_logs:
         try:
             from coach.food import log_chat_entry, adjust_last_log
@@ -492,7 +496,10 @@ def handle_message(user_id: str, user_text: str,
             log.exception("failed to process chat %s directive", kind)
             from coach.food import LABELS, _lang_code
             status = LABELS.get(_lang_code(db.get_user_language(user_id)), LABELS["en"])["not_synced"]
-        if status:
+        from coach.flex import FlexReply
+        if isinstance(status, FlexReply):
+            extra_flex.append(status)
+        elif status:
             reply = reply + "\n\n" + status
 
     # If the coach requested a deletion: a quote-reply deletes exactly the
@@ -524,7 +531,7 @@ def handle_message(user_id: str, user_text: str,
     # Store coach reply
     _save_chat_message(user_id, "coach", reply)
 
-    return reply, created_rowids
+    return reply, created_rowids, extra_flex
 
 
 def _format_plan(plan: dict) -> str:
@@ -628,5 +635,7 @@ if __name__ == "__main__":
 
     message = sys.argv[1] if len(sys.argv) > 1 else "How did I sleep last night?"
     print(f"You: {message}\n")
-    reply, _ = handle_message(DEFAULT_USER_ID, message)
+    reply, _, extra_flex = handle_message(DEFAULT_USER_ID, message)
     print(f"Coach: {reply}")
+    for f in extra_flex:
+        print(f"[flex] {f.alt_text}")
