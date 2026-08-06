@@ -17,7 +17,7 @@ from google import genai
 from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
-from coach.flex import FlexReply, build_log_bubble
+from coach.flex import FlexReply, build_log_bubble, COLOR_FOOD, COLOR_DRINK
 from coach.health_api import HealthAPIError, client_for_user
 
 log = logging.getLogger(__name__)
@@ -405,12 +405,7 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
              "health_point_names": [n for n in (hydration_point, nutrition_point) if n]},
             synced_hydration,
         )
-        if synced_hydration and synced_nutrition:
-            sync_label = labels["synced_drink"] + " + " + labels["synced_food"]
-        elif synced_hydration:
-            sync_label = labels["synced_drink"]
-        else:
-            sync_label = labels["not_synced"]
+        sync_label = labels["synced"] if (synced_hydration or synced_nutrition) else labels["not_synced"]
 
         name = analysis.get("drink_name_local") or analysis.get("drink_name_en") or "drink"
         ml = round(float(analysis.get("volume_ml") or 0))
@@ -423,7 +418,6 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         rows = []
         if count > 1:
             rows.append((labels["containers"], str(count)))
-        rows.append((labels["volume"], f"{ml} ml"))
         if cal > 0:
             rows.append((labels["energy"], f"{cal} kcal"))
         if protein > 0:
@@ -434,7 +428,8 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
             rows.append((labels["fat"], f"{fat} g"))
 
         bubble = build_log_bubble(
-            name=name, emoji="💧", rows=rows, notes=analysis.get("notes"),
+            name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
+            highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
         )
         return FlexReply(f"💧 {name}", bubble), rowid
@@ -455,14 +450,14 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
     carbs = round(float(analysis.get("total_carbohydrate_g") or 0))
     fat = round(float(analysis.get("total_fat_g") or 0))
     rows = [
-        (labels["energy"], f"{cal} kcal"),
         (labels["protein"], f"{protein} g"),
         (labels["carbs"], f"{carbs} g"),
         (labels["fat"], f"{fat} g"),
     ]
     bubble = build_log_bubble(
-        name=name, emoji="🍽️", rows=rows, notes=analysis.get("notes"),
-        synced=synced, sync_label=labels["synced_food"] if synced else labels["not_synced"],
+        name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
+        highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
+        synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -752,12 +747,10 @@ def adjust_last_log(user_id: str, params: dict | None,
             })
             if nutrition_point:
                 new_points.append(nutrition_point)
-        ok_label = labels["synced_drink"]
     else:
         synced, food_point = log_food_to_health(user_id, scaled)
         if food_point:
             new_points.append(food_point)
-        ok_label = labels["synced_food"]
     scaled["health_point_names"] = new_points
 
     with db.connect() as conn:
@@ -765,7 +758,7 @@ def adjust_last_log(user_id: str, params: dict | None,
             "UPDATE insights SET content = ? WHERE rowid = ?",
             (json.dumps({**scaled, "synced_to_health": synced}), row["rowid"]),
         )
-    return (ok_label if synced else labels["not_synced"]), row["rowid"]
+    return (labels["synced"] if synced else labels["not_synced"]), row["rowid"]
 
 
 def delete_last_log(user_id: str, kind: str = "food") -> str | None:
@@ -840,9 +833,10 @@ LABELS = {
         "fat": "🥑 Fat",
         "volume": "🥤 Volume",
         "containers": "🧴 Containers",
-        "synced_food": "✅ Logged to Google Health",
-        "synced_drink": "✅ Hydration logged to Google Health",
-        "not_synced": "⚠️ Analyzed, but couldn't save to Google Health",
+        "kicker_food": "🍽️ Nutrition log",
+        "kicker_drink": "💧 Hydration log",
+        "synced": "✅ Logged",
+        "not_synced": "⚠️ Not saved",
         "low_conf": "(Estimate may be off — try a clearer photo for better accuracy)",
         "empty_drink": "🥤 This looks like an empty container, so I didn't log any hydration. Send a photo with a drink in it and I'll track it!",
         "empty_food": "🍽️ I couldn't estimate a real portion here, so nothing was logged. Try a clearer photo of the food.",
@@ -863,9 +857,10 @@ LABELS = {
         "fat": "🥑 ไขมัน",
         "volume": "🥤 ปริมาณ",
         "containers": "🧴 จำนวนภาชนะ",
-        "synced_food": "✅ บันทึกลง Google Health เรียบร้อยแล้ว",
-        "synced_drink": "✅ บันทึกการดื่มน้ำลง Google Health แล้ว",
-        "not_synced": "⚠️ วิเคราะห์สำเร็จ แต่ยังบันทึกลง Google Health ไม่ได้",
+        "kicker_food": "🍽️ บันทึกโภชนาการ",
+        "kicker_drink": "💧 บันทึกการดื่มน้ำ",
+        "synced": "✅ บันทึกแล้ว",
+        "not_synced": "⚠️ บันทึกไม่สำเร็จ",
         "low_conf": "(ค่าประมาณอาจคลาดเคลื่อน ลองถ่ายชัด ๆ อีกครั้ง)",
         "empty_drink": "🥤 ดูเหมือนแก้ว/ขวดจะว่างเปล่า ผมเลยยังไม่ได้บันทึกนะครับ ถ้ามีน้ำอยู่ในภาพ ส่งมาใหม่ได้เลยครับ",
         "empty_food": "🍽️ ผมประเมินปริมาณอาหารไม่ได้ เลยยังไม่บันทึกครับ ลองถ่ายอาหารให้ชัดขึ้นอีกนิดนะครับ",
@@ -943,16 +938,16 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
     confidence = analysis.get("confidence", "medium")
 
     rows = [
-        (labels["energy"], f"{cal} kcal"),
         (labels["protein"], f"{protein} g"),
         (labels["carbs"], f"{carbs} g"),
         (labels["fat"], f"{fat} g"),
     ]
     bubble = build_log_bubble(
-        name=name, emoji="🍽️", rows=rows,
+        name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
+        highlight=("🔥", f"{cal} kcal"), rows=rows,
         notes=analysis.get("notes"),
         synced=synced,
-        sync_label=labels["synced_food"] if synced else labels["not_synced"],
+        sync_label=labels["synced"] if synced else labels["not_synced"],
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
     )
@@ -1001,7 +996,6 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
     rows = []
     if count > 1:
         rows.append((labels["containers"], str(count)))
-    rows.append((labels["volume"], f"{ml} ml"))
     if cal > 0:
         rows.append((labels["energy"], f"{cal} kcal"))
     if protein > 0:
@@ -1011,15 +1005,11 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
     if fat > 0:
         rows.append((labels["fat"], f"{fat} g"))
 
-    if synced_hydration and synced_nutrition:
-        sync_label = labels["synced_drink"] + " + " + labels["synced_food"]
-    elif synced_hydration:
-        sync_label = labels["synced_drink"]
-    else:
-        sync_label = labels["not_synced"]
+    sync_label = labels["synced"] if (synced_hydration or synced_nutrition) else labels["not_synced"]
 
     bubble = build_log_bubble(
-        name=name, emoji="💧", rows=rows,
+        name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
+        highlight=("🥤", f"{ml} ml"), rows=rows,
         notes=analysis.get("notes"),
         synced=synced_hydration or synced_nutrition,
         sync_label=sync_label,
