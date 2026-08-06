@@ -98,82 +98,51 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
                      image_url: str | None = None) -> dict:
-    """A food/drink log confirmation card, news-digest style.
+    """A food/drink log confirmation card.
 
-    Layout (top to bottom): a colored kicker bar ("NUTRITION LOG" /
-    "HYDRATION LOG"), then either a hero photo with the logged item's name
-    and a colored highlight badge (kcal for food, volume for drinks)
-    captioned over its bottom edge — or, when there's no photo, that same
-    title+badge sits at the top of the body instead. Below that: the rest
+    Layout (top to bottom): optional hero photo, a small uppercase kicker
+    ("NUTRITION LOG" / "HYDRATION LOG") in the type's accent color, the
+    logged item's name as a bold title, a colored highlight badge for the
+    single most important stat (kcal for food, volume for drinks), the rest
     of the macros as receipt-style itemized rows, an optional muted notes
-    line, and a footer status line (green when saved to Google Health, red
+    line, and a footer STATUS row (green when saved to Google Health, red
     when analysis succeeded but the write failed).
     """
     highlight_icon, highlight_value = highlight
 
-    highlight_chip = {
-        "type": "box",
-        "layout": "horizontal",
-        "margin": "sm",
-        "contents": [
-            {
-                "type": "box",
-                "layout": "vertical",
-                "flex": 0,
-                "backgroundColor": accent_color,
-                "cornerRadius": "8px",
-                "paddingAll": "6px",
-                "paddingStart": "10px",
-                "paddingEnd": "10px",
-                "contents": [
-                    {"type": "text", "text": f"{highlight_icon} {highlight_value}",
-                     "size": "sm", "weight": "bold", "color": "#FFFFFF", "align": "center"},
-                ],
-            },
-        ],
-    }
-
-    hero = None
-    body_contents = []
-    if image_url:
-        # Caption strip is a solid, fully-opaque bar (not alpha-blended) —
-        # translucent backgroundColor over an image is unverified against
-        # LINE's real API, so this sticks to a plain 6-digit hex.
-        hero = {
+    body_contents = [
+        _kicker(kicker, accent_color),
+        {"type": "text", "text": name, "weight": "bold", "size": "xl",
+         "wrap": True, "color": TEXT_DARK, "margin": "xs"},
+        {
             "type": "box",
-            "layout": "vertical",
+            "layout": "horizontal",
+            "margin": "md",
             "contents": [
-                {"type": "image", "url": image_url, "size": "full",
-                 "aspectRatio": "20:13", "aspectMode": "cover"},
                 {
                     "type": "box",
                     "layout": "vertical",
-                    "position": "absolute",
-                    "offsetBottom": "0px",
-                    "offsetStart": "0px",
-                    "offsetEnd": "0px",
-                    "backgroundColor": "#000000",
-                    "paddingAll": "12px",
+                    "flex": 0,
+                    "backgroundColor": accent_color,
+                    "cornerRadius": "8px",
+                    "paddingAll": "6px",
+                    "paddingStart": "10px",
+                    "paddingEnd": "10px",
                     "contents": [
-                        {"type": "text", "text": name, "weight": "bold", "size": "xl",
-                         "wrap": True, "color": "#FFFFFF"},
-                        highlight_chip,
+                        {"type": "text", "text": f"{highlight_icon} {highlight_value}",
+                         "size": "sm", "weight": "bold", "color": "#FFFFFF", "align": "center"},
                     ],
                 },
             ],
-        }
-    else:
-        body_contents.append({"type": "text", "text": name, "weight": "bold", "size": "xl",
-                              "wrap": True, "color": TEXT_DARK})
-        body_contents.append(highlight_chip)
+        },
+    ]
 
     if rows:
-        if body_contents:
-            body_contents.append({"type": "separator", "margin": "lg"})
+        body_contents.append({"type": "separator", "margin": "lg"})
         body_contents.append({
             "type": "box",
             "layout": "vertical",
-            "margin": "lg" if body_contents else "none",
+            "margin": "lg",
             "spacing": "sm",
             "contents": [
                 {
@@ -190,44 +159,34 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         })
 
     if notes:
-        if body_contents:
-            body_contents.append({"type": "separator", "margin": "lg"})
+        body_contents.append({"type": "separator", "margin": "lg"})
         body_contents.append({
             "type": "text", "text": notes, "size": "xs", "color": TEXT_MUTED,
-            "wrap": True, "margin": "lg" if body_contents else "none",
+            "wrap": True, "margin": "lg",
         })
 
-    footer_contents = [
-        {"type": "separator"},
-        {"type": "text", "text": sync_label, "size": "sm", "weight": "bold", "wrap": True,
-         "align": "center", "margin": "md",
-         "color": COLOR_SYNCED if synced else COLOR_NOT_SYNCED},
-    ]
+    footer_contents = [{
+        "type": "box",
+        "layout": "baseline",
+        "contents": [
+            {"type": "text", "text": "STATUS", "size": "xs", "color": TEXT_MUTED, "flex": 1},
+            {"type": "text", "text": sync_label, "size": "xs", "wrap": True, "weight": "bold",
+             "align": "end", "flex": 2,
+             "color": COLOR_SYNCED if synced else COLOR_NOT_SYNCED},
+        ],
+    }]
     if low_conf_label:
         footer_contents.append({"type": "text", "text": low_conf_label, "size": "xs",
-                                "color": TEXT_MUTED, "wrap": True, "align": "center", "margin": "xs"})
+                                "color": TEXT_MUTED, "wrap": True, "margin": "xs"})
 
-    hero_children = [hero] if hero else []
-    if hero and body_contents:
-        hero_children.append({"type": "box", "layout": "vertical", "paddingAll": "16px",
-                              "contents": body_contents})
-
-    return {
+    bubble = {
         "type": "bubble",
         "size": "kilo",
-        "header": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": accent_color,
-            "paddingAll": "12px",
-            "contents": [_kicker(kicker, "#FFFFFF")],
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "paddingAll": "0px" if hero else "16px",
-            "contents": hero_children if hero else body_contents,
-        },
+        "body": {"type": "box", "layout": "vertical", "paddingAll": "16px", "contents": body_contents},
         "footer": {"type": "box", "layout": "vertical", "paddingAll": "12px",
                   "spacing": "xs", "contents": footer_contents},
     }
+    if image_url:
+        bubble["hero"] = {"type": "image", "url": image_url, "size": "full",
+                          "aspectRatio": "20:13", "aspectMode": "cover"}
+    return bubble
