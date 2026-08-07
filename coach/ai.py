@@ -275,6 +275,69 @@ def _summarize_sleep_stages(stages: list[dict]) -> dict:
     }
 
 
+DAILY_NARRATIVE_PROMPT = """\
+You are a personal health coach writing the "Today's Focus" narrative for a
+daily brief delivered via LINE. The user's numbers (recovery, sleep, activity)
+are ALREADY shown to them as visual stat cards above your text — so do NOT
+restate raw metrics or list them back. Your job is the human part: interpret
+what the data means today and give clear, motivating direction.
+
+Write 2-4 short sentences that:
+- Lead with today's recovery/readiness verdict if "trends.readiness.verdict"
+  is present and non-null (well recovered → push; under-recovered → ease up),
+  interpreting it rather than reciting the signals.
+- Reference "todays_workout" if present — tell them to do it (or adapt it to
+  their recovery). Use "exercise_sessions" to acknowledge what they actually
+  did recently and note adherence, but don't assume a skip when it's empty.
+- Close with one motivating line or a light question.
+
+Rules:
+- Respond in the user's preferred language (check coach_memory, default English).
+- LINE has no markdown. Plain sentences only. No section headers, no emoji
+  headers, no bullet lists, no 「」number callouts — this is a prose paragraph.
+- You MAY mention at most one specific number if it genuinely sharpens the
+  coaching, but never enumerate the metrics. Keep it under 320 characters.
+- Never give medical advice. Always finish your sentences.
+"""
+
+
+def generate_daily_narrative(user_id: str, snapshot: dict | None = None) -> str:
+    """Generate ONLY the short 'Today's Focus' narrative for the daily brief.
+
+    The metrics are rendered deterministically as Flex stat cards, so this asks
+    Gemini purely for interpretation/coaching prose. Returns the narrative text
+    and stores it as a 'daily_summary' insight (same kind as the legacy full
+    brief, so delivery/retry bookkeeping is unchanged).
+    """
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    if not api_key:
+        raise RuntimeError("No Gemini API key configured")
+
+    if snapshot is None:
+        snapshot = build_daily_snapshot(user_id)
+
+    language = db.get_user_language(user_id)
+    user_message = (
+        "Here is my health data snapshot for today (the numbers are already "
+        "shown to me as cards — write only the coaching narrative):\n\n"
+        f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
+        f"Write my 'Today's Focus' narrative in {language}."
+    )
+
+    text = gemini.generate(
+        api_key, contents=user_message, system_instruction=DAILY_NARRATIVE_PROMPT,
+        max_output_tokens=1024, min_chars=20,
+    )
+
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO insights (user_id, ts, kind, content, delivered) VALUES (?, datetime('now'), 'daily_summary', ?, 0)",
+            (user_id, text),
+        )
+    return text
+
+
 def generate_daily_summary(user_id: str, snapshot: dict | None = None) -> str:
     """Generate a daily coaching message using Gemini.
 

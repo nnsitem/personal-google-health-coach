@@ -11,33 +11,34 @@ from datetime import datetime, timedelta
 from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
-from coach.flex import build_report_bubble, COLOR_WEEKLY
+from coach.flex import build_weekly_report_bubble, trend_chip, COLOR_WEEKLY
 from coach.line import send_messages, flex_message, LineError
+from coach.stats import build_trends
 from coach.sync import run_sync
 
 log = logging.getLogger(__name__)
 
 WEEKLY_SYSTEM_PROMPT = """\
-You are a personal health coach delivering a weekly health report via LINE messaging.
-You receive a full week of health data and should provide a comprehensive yet readable summary.
+You are a personal health coach writing the "Key Insight" narrative for a
+weekly report delivered via LINE. The user's weekly numbers — a 7-day steps
+chart and their step / sleep / resting-HR / active-minute averages with
+week-over-week trends — are ALREADY shown to them as visual cards above your
+text. So do NOT restate totals or list metrics back.
 
-Structure your report like this:
-1. A brief celebratory or encouraging opening
-2. Weekly totals and averages (steps, calories, active minutes)
-3. Sleep quality summary (average duration, consistency, deep/REM trends)
-4. Heart rate & recovery trends
-5. Goal progress (if goals are set)
-6. One key insight or pattern you noticed
-7. Focus suggestion for next week
+Write 3-5 short sentences that:
+1. Open with one line of genuine encouragement grounded in the week.
+2. Name the single most useful PATTERN you see (e.g. "your best step days
+   line up with nights you slept 7h+", or a consistency/recovery observation)
+   — interpretation the raw numbers alone don't give.
+3. End with ONE concrete focus for next week.
 
-Guidelines:
-- Respond in the same language the user prefers (check coach memory for language preference)
-- LINE does NOT support markdown. Use emoji as section headers (🚶❤️🛌🎯📊) and「」to highlight key numbers
-- One blank line between sections for readability
-- Keep it informative but readable — around 800-1200 characters
-- Be specific with data, show comparisons (this week vs last week if available)
-- End with an encouraging note
-- Always complete your sentences
+Rules:
+- Respond in the user's preferred language (check coach_memory, default English).
+- LINE has no markdown. Plain prose sentences only — no section headers, no
+  emoji headers, no bullet lists, no 「」callouts.
+- You MAY cite at most one or two specific numbers if they sharpen the insight,
+  but never enumerate the weekly stats. Keep it under 500 characters.
+- No medical advice. Always finish your sentences.
 """
 
 
@@ -149,14 +150,16 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
 
     language = db.get_user_language(user_id)
     user_message = (
-        "Here is my complete health data for the past week:\n\n"
+        "Here is my complete health data for the past week (the totals, "
+        "averages and a steps chart are already shown to me as cards — write "
+        "only the coaching insight):\n\n"
         f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```\n\n"
-        f"Generate my weekly health report. Write the entire report in {language}."
+        f"Write my weekly 'Key Insight' narrative in {language}."
     )
 
     text = gemini.generate(
         api_key, contents=user_message, system_instruction=WEEKLY_SYSTEM_PROMPT,
-        max_output_tokens=4096, min_chars=100,
+        max_output_tokens=1536, min_chars=40,
     )
 
     with db.connect() as conn:
@@ -165,6 +168,52 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
             (user_id, text),
         )
     return text
+
+
+def _fmt_range(week_range: str) -> str:
+    """'2026-07-28 to 2026-08-03' → '28 Jul – 3 Aug'."""
+    try:
+        a, b = week_range.split(" to ")
+        da = datetime.fromisoformat(a).strftime("%-d %b")
+        db_ = datetime.fromisoformat(b).strftime("%-d %b")
+        return f"{da} – {db_}"
+    except (ValueError, AttributeError):
+        return week_range or ""
+
+
+def _weekly_view_model(user_id: str, snapshot: dict) -> dict:
+    """Deterministic weekly stats: a 7-day steps series + averages with
+    week-over-week trend chips. Gemini contributes only the narrative."""
+    trends = build_trends(user_id)
+    tz = db.user_tz(db.get_user(user_id))
+    today = datetime.now(tz).date()
+    daily = snapshot.get("daily_metrics", {})
+
+    steps_series: list[tuple[str, float]] = []
+    for i in range(7, 0, -1):
+        d = today - timedelta(days=i)
+        steps = (daily.get(d.isoformat()) or {}).get("steps", 0) or 0
+        steps_series.append((d.strftime("%a")[0], steps))
+
+    def avg_row(label, metric, fmt, higher_is_better):
+        m = trends.get(metric) or {}
+        wa = m.get("week_avg")
+        if wa is None:
+            return None
+        return (label, fmt(wa), trend_chip(m.get("trend"), higher_is_better))
+
+    average_rows = [r for r in (
+        avg_row("Steps / day", "steps", lambda v: f"{int(round(v)):,}", True),
+        avg_row("Sleep / night", "sleep_hours", lambda v: f"{round(v, 1)}h", True),
+        avg_row("Resting HR", "resting_hr", lambda v: f"{int(round(v))} bpm", False),
+        avg_row("Active-zone min", "active_zone_min", lambda v: f"{int(round(v))}", True),
+    ) if r]
+
+    return {
+        "range_label": _fmt_range(snapshot.get("week_range", "")),
+        "steps_series": steps_series,
+        "average_rows": average_rows,
+    }
 
 
 def run_weekly_report(user_id: str) -> str:
@@ -178,12 +227,22 @@ def run_weekly_report(user_id: str) -> str:
     except Exception:
         log.exception("sync failed before weekly report — proceeding with stale data")
 
-    log.info("generating weekly report...")
-    message = generate_weekly_report(user_id)
-    log.info("weekly report generated (%d chars)", len(message))
+    # Build the snapshot once; derive deterministic stats + the narrative
+    snapshot = build_weekly_snapshot(user_id)
+    vm = _weekly_view_model(user_id, snapshot)
+
+    log.info("generating weekly narrative...")
+    message = generate_weekly_report(user_id, snapshot)
+    log.info("weekly narrative generated (%d chars)", len(message))
 
     try:
-        bubble = build_report_bubble("Weekly Report", "📊", COLOR_WEEKLY, message)
+        bubble = build_weekly_report_bubble(
+            color=COLOR_WEEKLY,
+            range_label=vm["range_label"],
+            steps_series=vm["steps_series"],
+            average_rows=vm["average_rows"],
+            narrative=message,
+        )
         send_messages([flex_message("📊 Your weekly health report is ready", bubble)], to=user_id)
         log.info("weekly report sent via LINE")
         with db.connect() as conn:
