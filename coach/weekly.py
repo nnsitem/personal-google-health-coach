@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from coach import db
 from coach import gemini
 from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
-from coach.flex import build_weekly_report_bubble, trend_chip, COLOR_WEEKLY
+from coach.flex import (build_weekly_report_bubble, trend_chip, report_labels,
+                        REPORT_LABELS, COLOR_WEEKLY)
 from coach.line import send_messages, flex_message, LineError
 from coach.stats import build_trends
 from coach.sync import run_sync
@@ -170,18 +171,19 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
     return text
 
 
-def _fmt_range(week_range: str) -> str:
-    """'2026-07-28 to 2026-08-03' → '28 Jul – 3 Aug'."""
+def _fmt_range(week_range: str, labels: dict) -> str:
+    """'2026-07-28 to 2026-08-03' → localized '28 Jul – 3 Aug' / '28 ก.ค. – 3 ส.ค.'."""
+    def one(iso: str) -> str:
+        d = datetime.fromisoformat(iso)
+        return f"{d.day} {labels['months'][d.month - 1]}"
     try:
         a, b = week_range.split(" to ")
-        da = datetime.fromisoformat(a).strftime("%-d %b")
-        db_ = datetime.fromisoformat(b).strftime("%-d %b")
-        return f"{da} – {db_}"
+        return f"{one(a)} – {one(b)}"
     except (ValueError, AttributeError):
         return week_range or ""
 
 
-def _weekly_view_model(user_id: str, snapshot: dict) -> dict:
+def _weekly_view_model(user_id: str, snapshot: dict, labels: dict) -> dict:
     """Deterministic weekly stats: a 7-day steps series + averages with
     week-over-week trend chips. Gemini contributes only the narrative."""
     trends = build_trends(user_id)
@@ -193,7 +195,9 @@ def _weekly_view_model(user_id: str, snapshot: dict) -> dict:
     for i in range(7, 0, -1):
         d = today - timedelta(days=i)
         steps = (daily.get(d.isoformat()) or {}).get("steps", 0) or 0
-        steps_series.append((d.strftime("%a")[0], steps))
+        # Compact axis tick: English first-letter, Thai short weekday (no dot).
+        tick = labels["weekdays"][d.weekday()].rstrip(".")
+        steps_series.append((tick[0] if labels is REPORT_LABELS["en"] else tick, steps))
 
     def avg_row(label, metric, fmt, higher_is_better):
         m = trends.get(metric) or {}
@@ -203,14 +207,14 @@ def _weekly_view_model(user_id: str, snapshot: dict) -> dict:
         return (label, fmt(wa), trend_chip(m.get("trend"), higher_is_better))
 
     average_rows = [r for r in (
-        avg_row("Steps / day", "steps", lambda v: f"{int(round(v)):,}", True),
-        avg_row("Sleep / night", "sleep_hours", lambda v: f"{round(v, 1)}h", True),
-        avg_row("Resting HR", "resting_hr", lambda v: f"{int(round(v))} bpm", False),
-        avg_row("Active-zone min", "active_zone_min", lambda v: f"{int(round(v))}", True),
+        avg_row(labels["steps_per_day"], "steps", lambda v: f"{int(round(v)):,}", True),
+        avg_row(labels["sleep_per_night"], "sleep_hours", lambda v: f"{round(v, 1)}h", True),
+        avg_row(labels["resting_hr"], "resting_hr", lambda v: f"{int(round(v))} bpm", False),
+        avg_row(labels["azm"], "active_zone_min", lambda v: f"{int(round(v))}", True),
     ) if r]
 
     return {
-        "range_label": _fmt_range(snapshot.get("week_range", "")),
+        "range_label": _fmt_range(snapshot.get("week_range", ""), labels),
         "steps_series": steps_series,
         "average_rows": average_rows,
     }
@@ -229,7 +233,8 @@ def run_weekly_report(user_id: str) -> str:
 
     # Build the snapshot once; derive deterministic stats + the narrative
     snapshot = build_weekly_snapshot(user_id)
-    vm = _weekly_view_model(user_id, snapshot)
+    labels = report_labels(db.get_user_language(user_id))
+    vm = _weekly_view_model(user_id, snapshot, labels)
 
     log.info("generating weekly narrative...")
     message = generate_weekly_report(user_id, snapshot)
@@ -242,6 +247,7 @@ def run_weekly_report(user_id: str) -> str:
             steps_series=vm["steps_series"],
             average_rows=vm["average_rows"],
             narrative=message,
+            labels=labels,
         )
         send_messages([flex_message("📊 Your weekly health report is ready", bubble)], to=user_id)
         log.info("weekly report sent via LINE")
