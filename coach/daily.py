@@ -9,14 +9,15 @@ from datetime import datetime
 
 from coach import db
 from coach.ai import build_daily_snapshot, generate_daily_narrative
-from coach.flex import build_daily_report_bubble, delta_chip, COLOR_DAILY
+from coach.flex import (build_daily_report_bubble, delta_chip, report_labels,
+                        REPORT_LABELS, COLOR_DAILY)
 from coach.sync import run_sync
 from coach.line import send_messages, flex_message, LineError
 
 log = logging.getLogger(__name__)
 
 
-def _readiness_pill(readiness: dict | None) -> str | None:
+def _readiness_pill(readiness: dict | None, labels: dict) -> str | None:
     """Short header pill from the trends.readiness verdict + score."""
     if not readiness:
         return None
@@ -25,14 +26,27 @@ def _readiness_pill(readiness: dict | None) -> str | None:
     if not verdict:
         return None
     if "well recovered" in verdict:
-        label = "✅ Well recovered"
+        label = labels["rd_well"]
     elif "under-recovered" in verdict:
-        label = "⚠️ Under-recovered"
+        label = labels["rd_under"]
     elif "fatigue" in verdict or "illness" in verdict:
-        label = "🩺 Possible fatigue signal"
+        label = labels["rd_fatigue"]
     else:
-        label = "• Normal recovery"
+        label = labels["rd_normal"]
     return f"{label} · {score}" if score is not None else label
+
+
+def _fmt_date(iso: str, labels: dict) -> str:
+    """'2026-08-08' → localized 'SAT 8 AUG' / 'ส. 8 ส.ค.'."""
+    try:
+        d = datetime.fromisoformat(iso)
+    except (ValueError, TypeError):
+        return ""
+    wd = labels["weekdays"][d.weekday()]
+    mon = labels["months"][d.month - 1]
+    text = f"{wd} {d.day} {mon}"
+    # English abbreviations read better uppercased; Thai has no case.
+    return text.upper() if labels is REPORT_LABELS["en"] else text
 
 
 def _latest_and_avg(trends: dict, metric: str) -> tuple[float | None, float | None]:
@@ -42,7 +56,7 @@ def _latest_and_avg(trends: dict, metric: str) -> tuple[float | None, float | No
     return latest, m.get("week_avg")
 
 
-def _daily_view_model(snapshot: dict) -> dict:
+def _daily_view_model(snapshot: dict, labels: dict) -> dict:
     """Turn the daily snapshot into rows the Flex builder can render directly.
     All numbers are deterministic here — Gemini only writes the narrative."""
     trends = snapshot.get("trends") or {}
@@ -50,28 +64,28 @@ def _daily_view_model(snapshot: dict) -> dict:
     recovery_rows: list[tuple[str, str, dict | None]] = []
     rhr, rhr_avg = _latest_and_avg(trends, "resting_hr")
     if rhr is not None:
-        recovery_rows.append(("Resting HR", f"{int(round(rhr))} bpm",
+        recovery_rows.append((labels["resting_hr"], f"{int(round(rhr))} bpm",
                               delta_chip(rhr, rhr_avg, higher_is_better=False)))
     hrv, hrv_avg = _latest_and_avg(trends, "hrv_ms")
     if hrv is not None:
-        recovery_rows.append(("HRV", f"{int(round(hrv))} ms",
+        recovery_rows.append((labels["hrv"], f"{int(round(hrv))} ms",
                               delta_chip(hrv, hrv_avg, higher_is_better=True)))
     spo2, spo2_avg = _latest_and_avg(trends, "spo2_pct")
     if spo2 is not None:
-        recovery_rows.append(("SpO₂", f"{round(spo2, 1)}%", None))
+        recovery_rows.append((labels["spo2"], f"{round(spo2, 1)}%", None))
 
     activity_rows: list[tuple[str, str, dict | None]] = []
     steps, steps_avg = _latest_and_avg(trends, "steps")
     if steps is not None:
-        activity_rows.append(("Steps", f"{int(round(steps)):,}",
+        activity_rows.append((labels["steps"], f"{int(round(steps)):,}",
                               delta_chip(steps, steps_avg, higher_is_better=True)))
     azm, azm_avg = _latest_and_avg(trends, "active_zone_min")
     if azm is not None:
-        activity_rows.append(("Active-zone min", f"{int(round(azm))}",
+        activity_rows.append((labels["azm"], f"{int(round(azm))}",
                               delta_chip(azm, azm_avg, higher_is_better=True)))
     cal, _ = _latest_and_avg(trends, "calories_kcal")
     if cal is not None:
-        activity_rows.append(("Calories", f"{int(round(cal)):,} kcal", None))
+        activity_rows.append((labels["calories"], f"{int(round(cal)):,} kcal", None))
 
     sleep_label = None
     sleep_stage_min = None
@@ -83,16 +97,11 @@ def _daily_view_model(snapshot: dict) -> dict:
             "REM": s0.get("rem_min", 0), "AWAKE": s0.get("awake_min", 0),
         }
         hrs = s0.get("duration_hours")
-        sleep_label = f"🛌 SLEEP · {hrs}h asleep" if hrs else "🛌 SLEEP"
-
-    try:
-        date_label = datetime.fromisoformat(snapshot["today"]).strftime("%a %-d %b").upper()
-    except (ValueError, KeyError):
-        date_label = ""
+        sleep_label = f"{labels['sleep']} · {hrs}h {labels['asleep']}" if hrs else labels["sleep"]
 
     return {
-        "date_label": date_label,
-        "readiness_pill": _readiness_pill(trends.get("readiness")),
+        "date_label": _fmt_date(snapshot.get("today", ""), labels),
+        "readiness_pill": _readiness_pill(trends.get("readiness"), labels),
         "recovery_rows": recovery_rows,
         "sleep_label": sleep_label,
         "sleep_stage_min": sleep_stage_min,
@@ -116,7 +125,8 @@ def run_daily_summary(user_id: str) -> str:
 
     # 2. Build the snapshot once; derive deterministic stat rows + the narrative
     snapshot = build_daily_snapshot(user_id)
-    vm = _daily_view_model(snapshot)
+    labels = report_labels(db.get_user_language(user_id))
+    vm = _daily_view_model(snapshot, labels)
 
     log.info("generating daily narrative with Gemini...")
     narrative = generate_daily_narrative(user_id, snapshot)
@@ -133,6 +143,7 @@ def run_daily_summary(user_id: str) -> str:
             sleep_stage_min=vm["sleep_stage_min"],
             activity_rows=vm["activity_rows"],
             narrative=narrative,
+            labels=labels,
         )
         send_messages([flex_message("🌅 Your daily health brief is ready", bubble)], to=user_id)
         log.info("daily summary sent via LINE")

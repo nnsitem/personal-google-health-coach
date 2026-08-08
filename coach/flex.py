@@ -36,6 +36,77 @@ STAGE_COLORS = {
 BAR_STRONG = "#3D5A80"
 BAR_FADED = "#9DB2CE"
 
+
+# ---------------------------------------------------------------------------
+# Localized static labels for the data-driven report cards.
+#
+# The Gemini narrative already comes back in the user's language; these are the
+# card's *static* strings (section headers, sleep-stage legend, readiness pill,
+# comparison captions). Keyed by 'en'/'th' to match coach.food's LABELS pattern.
+# Row labels ("Resting HR", "Steps / day", …) live here too so the daily/weekly
+# view-models render them localized. Emoji glyphs are language-agnostic and kept.
+# ---------------------------------------------------------------------------
+REPORT_LABELS = {
+    "en": {
+        "daily_brief": "Daily Brief",
+        "weekly_report": "Weekly Report",
+        "recovery": "❤️ RECOVERY",
+        "sleep": "🛌 SLEEP",
+        "activity": "🚶 ACTIVITY",
+        "todays_focus": "🎯 TODAY'S FOCUS",
+        "steps_7day": "🚶 STEPS · 7-DAY",
+        "weekly_averages": "📈 WEEKLY AVERAGES",
+        "key_insight": "💡 KEY INSIGHT",
+        "asleep": "asleep",
+        "leg_deep": "🟦 Deep", "leg_rem": "🟪 REM", "leg_awake": "Awake",
+        "resting_hr": "Resting HR", "hrv": "HRV", "spo2": "SpO₂",
+        "steps": "Steps", "azm": "Active-zone min", "calories": "Calories",
+        "steps_per_day": "Steps / day", "sleep_per_night": "Sleep / night",
+        "vs_avg": "vs avg", "vs_last_wk": "vs last wk",
+        "rd_well": "✅ Well recovered", "rd_under": "⚠️ Under-recovered",
+        "rd_fatigue": "🩺 Possible fatigue signal", "rd_normal": "• Normal recovery",
+        "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "months": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    },
+    "th": {
+        "daily_brief": "สรุปสุขภาพวันนี้",
+        "weekly_report": "รายงานประจำสัปดาห์",
+        "recovery": "❤️ การฟื้นตัว",
+        "sleep": "🛌 การนอน",
+        "activity": "🚶 กิจกรรม",
+        "todays_focus": "🎯 โฟกัสวันนี้",
+        "steps_7day": "🚶 ก้าวเดิน · 7 วัน",
+        "weekly_averages": "📈 ค่าเฉลี่ยรายสัปดาห์",
+        "key_insight": "💡 ข้อสังเกตสำคัญ",
+        "asleep": "หลับ",
+        "leg_deep": "🟦 หลับลึก", "leg_rem": "🟪 REM", "leg_awake": "ตื่น",
+        "resting_hr": "หัวใจขณะพัก", "hrv": "HRV", "spo2": "SpO₂",
+        "steps": "ก้าวเดิน", "azm": "แอคทีฟโซน (นาที)", "calories": "แคลอรี่",
+        "steps_per_day": "ก้าว/วัน", "sleep_per_night": "นอน/คืน",
+        "vs_avg": "เทียบค่าเฉลี่ย", "vs_last_wk": "เทียบสัปดาห์ก่อน",
+        "rd_well": "✅ ฟื้นตัวดี", "rd_under": "⚠️ ฟื้นตัวไม่พอ",
+        "rd_fatigue": "🩺 อาจมีสัญญาณอ่อนล้า", "rd_normal": "• ฟื้นตัวปกติ",
+        "weekdays": ["จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส.", "อา."],
+        "months": ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."],
+    },
+}
+
+
+def lang_code(language: str | None) -> str:
+    """Normalize a language name/code to 'th' or 'en' for label lookup."""
+    l = (language or "").strip().lower()
+    if l.startswith("th") or "thai" in l or "ไทย" in l:
+        return "th"
+    return "en"
+
+
+def report_labels(language: str | None) -> dict:
+    """The localized static-label set for the report cards (falls back to en)."""
+    return REPORT_LABELS.get(lang_code(language), REPORT_LABELS["en"])
+
+
 # A header-derived headline longer than this reads as cramped/overwhelming
 # painted across a colored bar, so it's left in the body as regular text instead.
 _MAX_HEADLINE_CHARS = 160
@@ -124,68 +195,100 @@ def build_report_bubble(title: str, emoji: str, color: str, body_text: str) -> d
 _CHIP_TONE_COLOR = {"good": TREND_GOOD, "bad": TREND_BAD, "flat": TREND_FLAT}
 
 
-def delta_chip(current, baseline, higher_is_better: bool, *, unit: str = "vs avg",
+def delta_chip(current, baseline, higher_is_better: bool,
                flat_pct: float = 3.0) -> dict | None:
     """Chip comparing `current` to a `baseline` (e.g. today vs 7-day average).
 
-    Returns {"text": "▲ 12% vs avg", "tone": "good|bad|flat"} or None when a
-    comparison can't be made. `higher_is_better` decides whether an increase is
-    healthy (steps) or not (resting HR). Moves under `flat_pct` read as steady.
+    Returns {"text": "▲ 12%", "tone": "good|bad|flat"} or None when a comparison
+    can't be made. `higher_is_better` decides whether an increase is healthy
+    (steps) or not (resting HR). Moves under `flat_pct` read as steady ("≈").
+    The comparison basis ("vs avg") is shown once in the section header, not
+    repeated on every chip — that keeps each chip short enough never to wrap.
     """
     if current is None or not baseline:
         return None
     pct = (current - baseline) / baseline * 100
     if abs(pct) < flat_pct:
-        return {"text": f"≈ {unit}", "tone": "flat"}
+        return {"text": "≈", "tone": "flat"}
     up = pct > 0
     arrow = "▲" if up else "▼"
     tone = "good" if (up == higher_is_better) else "bad"
-    return {"text": f"{arrow} {abs(round(pct))}% {unit}", "tone": tone}
+    return {"text": f"{arrow} {abs(round(pct))}%", "tone": tone}
 
 
 def trend_chip(trend_str: str | None, higher_is_better: bool) -> dict | None:
     """Chip from a build_trends() week-over-week string like 'up 12% vs last
-    week' / 'down 5% vs last week' / 'steady'."""
+    week' / 'down 5% vs last week' / 'steady'. Returns a short "▲ 12%" / "≈"
+    chip; the "vs last wk" basis is shown once in the section header."""
     if not trend_str:
         return None
     if trend_str == "steady":
-        return {"text": "steady", "tone": "flat"}
+        return {"text": "≈", "tone": "flat"}
     up = trend_str.startswith("up")
     import re
     m = re.search(r"(\d+)%", trend_str)
     pct = m.group(1) if m else ""
     arrow = "▲" if up else "▼"
     tone = "good" if (up == higher_is_better) else "bad"
-    return {"text": f"{arrow} {pct}% vs last wk".replace("  ", " "), "tone": tone}
+    return {"text": f"{arrow} {pct}%", "tone": tone}
 
 
-def _section_label(text: str, color: str) -> dict:
-    return {"type": "text", "text": text, "size": "xs", "weight": "bold",
-            "color": color, "wrap": True}
+def _section_label(text: str, color: str, caption: str | None = None) -> dict:
+    """A small uppercase section header. When `caption` is given (e.g. the
+    comparison basis "vs avg"), it's rendered as muted text on the right so
+    the ▲/▼ chips below don't each need to spell it out."""
+    label = {"type": "text", "text": text, "size": "xs", "weight": "bold",
+             "color": color, "wrap": True, "gravity": "center", "flex": 1}
+    if not caption:
+        return label
+    return {"type": "box", "layout": "horizontal", "contents": [
+        label,
+        {"type": "text", "text": caption, "size": "xxs", "color": TEXT_MUTED,
+         "align": "end", "gravity": "center", "wrap": False, "flex": 0},
+    ]}
+
+
+# Fixed pixel widths for the value / chip columns of a stat row. LINE sizes a
+# flex child from its CONTENT first and only shares LEFTOVER space by the flex
+# ratio, so a flex-weighted value column is as wide as its own text — a chip-less
+# row (whose right neighbor is an empty filler) then ends up a different width
+# than a chip'd row, and the values fail to line up (the bug seen on-device).
+# Giving the value and chip fixed-width boxes makes every row's geometry
+# identical, so values right-align to one clean column regardless of chip.
+_VALUE_COL_WIDTH = "78px"   # fits "807 kcal" / "6,614" at sm-bold
+_CHIP_COL_WIDTH = "48px"    # fits "▼ 99%"
 
 
 def _stat_row(label: str, value: str, chip: dict | None) -> dict:
-    """A receipt-style row: muted label on the left, bold value (+ optional
-    trend chip) right-aligned."""
-    contents = [
+    """A receipt-style row: muted label on the left (flexes + may wrap), the
+    bold value in a fixed-width right-aligned column, then a fixed-width trend
+    chip column (empty when there's no chip).
+
+    Both the value and chip columns are fixed-width boxes, so their right edges
+    sit at the same x on every row — values line up cleanly whether or not a
+    row has a chip, and a long value can never shove the chip onto a new line."""
+    chip_text = chip["text"] if chip else ""
+    chip_color = _CHIP_TONE_COLOR.get(chip["tone"], TREND_FLAT) if chip else TEXT_MUTED
+    return {"type": "box", "layout": "horizontal", "contents": [
         {"type": "text", "text": label, "size": "sm", "color": TEXT_MUTED,
-         "flex": 5, "gravity": "center"},
-        {"type": "text", "text": value, "size": "sm", "weight": "bold",
-         "color": TEXT_DARK, "align": "end", "gravity": "center",
-         "flex": 3 if chip else 6},
-    ]
-    if chip:
-        contents.append({
-            "type": "text", "text": chip["text"], "size": "xs", "weight": "bold",
-            "color": _CHIP_TONE_COLOR.get(chip["tone"], TREND_FLAT),
-            "align": "end", "gravity": "center", "flex": 4,
-        })
-    return {"type": "box", "layout": "horizontal", "contents": contents}
+         "flex": 1, "gravity": "center", "wrap": True},
+        {"type": "box", "layout": "vertical", "flex": 0, "width": _VALUE_COL_WIDTH,
+         "contents": [
+            {"type": "text", "text": value, "size": "sm", "weight": "bold",
+             "color": TEXT_DARK, "align": "end", "gravity": "center", "wrap": False},
+         ]},
+        {"type": "box", "layout": "vertical", "flex": 0, "width": _CHIP_COL_WIDTH,
+         "contents": [
+            {"type": "text", "text": chip_text, "size": "xs", "weight": "bold",
+             "color": chip_color, "align": "end", "gravity": "center", "wrap": False},
+         ]},
+    ]}
 
 
-def _sleep_stage_bar(stage_min: dict) -> list[dict]:
+def _sleep_stage_bar(stage_min: dict, labels: dict | None = None) -> list[dict]:
     """A proportional deep/light/rem/awake bar + a small legend. Returns the
     body components to append (empty when there's no stage data)."""
+    L = labels or REPORT_LABELS["en"]
     segments = []
     for stage in ("DEEP", "LIGHT", "REM", "AWAKE"):
         mins = round(stage_min.get(stage, 0) or 0)
@@ -198,10 +301,10 @@ def _sleep_stage_bar(stage_min: dict) -> list[dict]:
     if not segments:
         return []
     legend = []
-    for stage, glyph in (("DEEP", "🟦 Deep"), ("REM", "🟪 REM"), ("AWAKE", "Awake")):
+    for stage, key in (("DEEP", "leg_deep"), ("REM", "leg_rem"), ("AWAKE", "leg_awake")):
         mins = round(stage_min.get(stage, 0) or 0)
         if mins > 0:
-            legend.append({"type": "text", "text": f"{glyph} {mins}m", "size": "xxs",
+            legend.append({"type": "text", "text": f"{L[key]} {mins}m", "size": "xxs",
                            "color": TEXT_MUTED, "flex": 0})
     return [
         {"type": "box", "layout": "horizontal", "height": "12px",
@@ -282,13 +385,16 @@ def build_daily_report_bubble(*, date_label: str, color: str,
                               recovery_rows: list[tuple[str, str, dict | None]],
                               sleep_label: str | None, sleep_stage_min: dict | None,
                               activity_rows: list[tuple[str, str, dict | None]],
-                              narrative: str) -> dict:
+                              narrative: str, labels: dict | None = None) -> dict:
     """Daily brief card: readiness pill in the header, then Recovery / Sleep /
-    Activity stat sections, then a Gemini 'Today's Focus' narrative."""
+    Activity stat sections, then a Gemini 'Today's Focus' narrative.
+
+    `labels` is a localized REPORT_LABELS[...] set (defaults to English)."""
+    L = labels or REPORT_LABELS["en"]
     body: list[dict] = []
 
     if recovery_rows:
-        body.append(_section_label("❤️ RECOVERY", color))
+        body.append(_section_label(L["recovery"], color, caption=L["vs_avg"]))
         body.append({"type": "box", "layout": "vertical", "margin": "sm", "spacing": "sm",
                      "contents": [_stat_row(*r) for r in recovery_rows]})
 
@@ -296,25 +402,25 @@ def build_daily_report_bubble(*, date_label: str, color: str,
         if body:
             body.append({"type": "separator", "margin": "lg"})
         body.append({"type": "box", "layout": "vertical", "margin": "lg" if len(body) > 1 else "none",
-                     "contents": [_section_label(sleep_label or "🛌 SLEEP", color),
-                                  *_sleep_stage_bar(sleep_stage_min)]})
+                     "contents": [_section_label(sleep_label or L["sleep"], color),
+                                  *_sleep_stage_bar(sleep_stage_min, L)]})
 
     if activity_rows:
         if body:
             body.append({"type": "separator", "margin": "lg"})
         body.append({"type": "box", "layout": "vertical", "margin": "lg" if body else "none",
-                     "contents": [_section_label("🚶 ACTIVITY", color),
+                     "contents": [_section_label(L["activity"], color, caption=L["vs_avg"]),
                                   {"type": "box", "layout": "vertical", "margin": "sm",
                                    "spacing": "sm", "contents": [_stat_row(*r) for r in activity_rows]}]})
 
-    body += _narrative_block("🎯 TODAY'S FOCUS", color, narrative)
+    body += _narrative_block(L["todays_focus"], color, narrative)
     if not body:
         body = [{"type": "text", "text": narrative or "—", "size": "sm",
                  "color": TEXT_DARK, "wrap": True}]
 
     return {
         "type": "bubble", "size": "mega",
-        "header": _report_header("Daily Brief", "🌅", color, date_label, readiness_pill),
+        "header": _report_header(L["daily_brief"], "🌅", color, date_label, readiness_pill),
         "body": {"type": "box", "layout": "vertical", "paddingAll": "16px", "contents": body},
     }
 
@@ -322,32 +428,35 @@ def build_daily_report_bubble(*, date_label: str, color: str,
 def build_weekly_report_bubble(*, range_label: str, color: str,
                                steps_series: list[tuple[str, float]],
                                average_rows: list[tuple[str, str, dict | None]],
-                               narrative: str) -> dict:
+                               narrative: str, labels: dict | None = None) -> dict:
     """Weekly report card: a 7-day steps bar chart, weekly averages with
-    week-over-week trend chips, and a Gemini 'Key Insight' narrative."""
+    week-over-week trend chips, and a Gemini 'Key Insight' narrative.
+
+    `labels` is a localized REPORT_LABELS[...] set (defaults to English)."""
+    L = labels or REPORT_LABELS["en"]
     body: list[dict] = []
 
     chart = _mini_bar_chart(steps_series) if steps_series else []
     if chart:
-        body.append(_section_label("🚶 STEPS · 7-DAY", color))
+        body.append(_section_label(L["steps_7day"], color))
         body += chart
 
     if average_rows:
         if body:
             body.append({"type": "separator", "margin": "lg"})
         body.append({"type": "box", "layout": "vertical", "margin": "lg" if body else "none",
-                     "contents": [_section_label("📈 WEEKLY AVERAGES", color),
+                     "contents": [_section_label(L["weekly_averages"], color, caption=L["vs_last_wk"]),
                                   {"type": "box", "layout": "vertical", "margin": "sm",
                                    "spacing": "sm", "contents": [_stat_row(*r) for r in average_rows]}]})
 
-    body += _narrative_block("💡 KEY INSIGHT", color, narrative)
+    body += _narrative_block(L["key_insight"], color, narrative)
     if not body:
         body = [{"type": "text", "text": narrative or "—", "size": "sm",
                  "color": TEXT_DARK, "wrap": True}]
 
     return {
         "type": "bubble", "size": "mega",
-        "header": _report_header("Weekly Report", "📊", color, range_label, None),
+        "header": _report_header(L["weekly_report"], "📊", color, range_label, None),
         "body": {"type": "box", "layout": "vertical", "paddingAll": "16px", "contents": body},
     }
 
