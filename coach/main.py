@@ -100,6 +100,7 @@ def _safe_weekly_report_all() -> None:
     """Hourly dispatcher: send the weekly report to each configured user whose
     LOCAL time is Sunday 9:00–9:59, at most once per local day."""
     from coach.weekly import run_weekly_report
+    from coach import notify
     for user in db.list_active_users():
         uid = user["line_user_id"]
         if not user.get("gemini_api_key"):
@@ -112,8 +113,11 @@ def _safe_weekly_report_all() -> None:
             continue
         try:
             run_weekly_report(uid)
-        except Exception:
+            notify.record_success(uid, "weekly_report")
+        except Exception as e:
             log.exception("weekly report failed for user %s", uid)
+            # Runs once per local week, so threshold 2 = two missed Sundays.
+            notify.record_failure(uid, "weekly_report", str(e), threshold=2)
 
 
 def _safe_backfill_all() -> None:

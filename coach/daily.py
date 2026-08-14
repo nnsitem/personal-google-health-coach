@@ -148,21 +148,28 @@ def run_daily_summary(user_id: str) -> str:
         send_messages([flex_message("🌅 Your daily health brief is ready", bubble)], to=user_id)
         log.info("daily summary sent via LINE")
 
-        # Mark as delivered
+        # Mark as delivered (scoped to this user — kind alone isn't unique
+        # across users, so an unscoped UPDATE could mark a DIFFERENT user's
+        # pending row as delivered while leaving this one undelivered).
         with db.connect() as conn:
             conn.execute(
                 """
                 UPDATE insights SET delivered = 1
                 WHERE rowid = (
                     SELECT rowid FROM insights
-                    WHERE kind = 'daily_summary' AND delivered = 0
+                    WHERE user_id = ? AND kind = 'daily_summary' AND delivered = 0
                     ORDER BY ts DESC LIMIT 1
                 )
                 """,
+                (user_id,),
             )
     except LineError as e:
         log.error("LINE delivery failed: %s", e)
-        log.info("message was saved to insights table for retry")
+        log.info("narrative was saved to insights table (undelivered) for retry")
+        # Re-raise so the caller's failure/retry bookkeeping (notify streak,
+        # insight_sent_today dedup) sees this as the failure it is — swallowing
+        # it here made the scheduler treat a silently-failed send as success.
+        raise
 
     return narrative
 

@@ -528,7 +528,11 @@ def get_user_language(user_id: str) -> str:
 
 
 def insight_sent_today(user_id: str, kind: str, tz) -> bool:
-    """Whether an insight of this kind exists since the user's local midnight.
+    """Whether an insight of this kind was actually DELIVERED since the
+    user's local midnight (not merely generated) — a narrative can be
+    generated and stored before delivery is attempted, so checking mere
+    existence would wrongly treat a failed LINE send as "already handled"
+    and skip any retry for the rest of the day.
 
     insights.ts is stored as SQLite datetime('now') (UTC), so the local
     midnight is converted to a UTC string for comparison.
@@ -538,7 +542,7 @@ def insight_sent_today(user_id: str, kind: str, tz) -> bool:
     cutoff = local_midnight.astimezone(_timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM insights WHERE user_id = ? AND kind = ? AND ts >= ? LIMIT 1",
+            "SELECT 1 FROM insights WHERE user_id = ? AND kind = ? AND delivered = 1 AND ts >= ? LIMIT 1",
             (user_id, kind, cutoff),
         ).fetchone()
     return row is not None

@@ -265,6 +265,10 @@ def run_weekly_report(user_id: str) -> str:
             )
     except LineError as e:
         log.error("LINE delivery failed: %s", e)
+        # Re-raise so the caller's failure/retry bookkeeping (notify streak,
+        # insight_sent_today dedup) sees this as the failure it is — swallowing
+        # it here made the scheduler treat a silently-failed send as success.
+        raise
 
     return message
 

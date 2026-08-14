@@ -41,6 +41,11 @@ _MESSAGES = {
         "I couldn't put together your daily summary the last couple of days.\n\n"
         "If your Gemini key changed or hit its quota, set a new one — send: set key"
     ),
+    "weekly_report": (
+        "⚠️ Weekly report problem\n\n"
+        "I couldn't put together your weekly report the last couple of weeks.\n\n"
+        "If your Gemini key changed or hit its quota, set a new one — send: set key"
+    ),
 }
 
 
