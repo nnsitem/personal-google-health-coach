@@ -267,8 +267,18 @@ def _stat_row(label: str, value: str, chip: dict | None) -> dict:
     Both the value and chip columns are fixed-width boxes, so their right edges
     sit at the same x on every row — values line up cleanly whether or not a
     row has a chip, and a long value can never shove the chip onto a new line."""
-    chip_text = chip["text"] if chip else ""
-    chip_color = _CHIP_TONE_COLOR.get(chip["tone"], TREND_FLAT) if chip else TEXT_MUTED
+    # LINE rejects text components with an empty string ("text": ""), so
+    # chip-less rows use a filler instead of an invisible text node.
+    if chip:
+        chip_col = {"type": "box", "layout": "vertical", "flex": 0, "width": _CHIP_COL_WIDTH,
+                    "contents": [
+                        {"type": "text", "text": chip["text"], "size": "xs", "weight": "bold",
+                         "color": _CHIP_TONE_COLOR.get(chip["tone"], TREND_FLAT),
+                         "align": "end", "gravity": "center", "wrap": False},
+                    ]}
+    else:
+        chip_col = {"type": "box", "layout": "vertical", "flex": 0, "width": _CHIP_COL_WIDTH,
+                    "contents": [{"type": "filler"}]}
     return {"type": "box", "layout": "horizontal", "contents": [
         {"type": "text", "text": label, "size": "sm", "color": TEXT_MUTED,
          "flex": 1, "gravity": "center", "wrap": True},
@@ -277,11 +287,7 @@ def _stat_row(label: str, value: str, chip: dict | None) -> dict:
             {"type": "text", "text": value, "size": "sm", "weight": "bold",
              "color": TEXT_DARK, "align": "end", "gravity": "center", "wrap": False},
          ]},
-        {"type": "box", "layout": "vertical", "flex": 0, "width": _CHIP_COL_WIDTH,
-         "contents": [
-            {"type": "text", "text": chip_text, "size": "xs", "weight": "bold",
-             "color": chip_color, "align": "end", "gravity": "center", "wrap": False},
-         ]},
+        chip_col,
     ]}
 
 
