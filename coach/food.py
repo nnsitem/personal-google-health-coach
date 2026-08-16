@@ -126,46 +126,104 @@ def _meal_label_for(analysis: dict, lang: str) -> str | None:
 
 
 def _today_nutrition_totals(user_id: str) -> dict:
-    """Sum today's food logs (kcal, protein) and drink logs (ml) from local DB.
+    """Get today's nutrition + hydration totals from Google Health (authoritative,
+    includes data from ALL apps). Falls back to local DB if the API call fails.
 
-    Returns {"kcal": int, "protein_g": int, "water_ml": int}.
+    Returns {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}.
     """
     tz = db.user_tz(db.get_user(user_id))
-    today_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    cutoff_utc = today_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now(tz).date()
+    tomorrow = today + timedelta(days=1)
 
-    totals = {"kcal": 0, "protein_g": 0, "water_ml": 0}
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT content FROM insights WHERE user_id = ? AND kind = 'food_log' AND ts >= ?",
-            (user_id, cutoff_utc),
-        ).fetchall()
-    for row in rows:
-        try:
-            c = json.loads(row["content"])
-        except (json.JSONDecodeError, ValueError):
-            continue
-        totals["kcal"] += round(_num(c.get("calories_kcal")))
-        totals["protein_g"] += round(_num(c.get("protein_g")))
-        if c.get("type") == "drink":
-            totals["water_ml"] += round(_num(c.get("volume_ml")))
+    totals = {"kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "water_ml": 0}
+
+    try:
+        client = client_for_user(user_id)
+
+        # Nutrition rollup for today
+        nutrition_points = client.daily_rollup(
+            "nutrition-log", today.isoformat(), tomorrow.isoformat())
+        for pt in nutrition_points:
+            nl = pt.get("nutritionLog", {})
+            totals["kcal"] += round(float(nl.get("energy", {}).get("kcalSum", 0)))
+            totals["carbs_g"] += round(float(nl.get("totalCarbohydrate", {}).get("gramsSum", 0)))
+            totals["fat_g"] += round(float(nl.get("totalFat", {}).get("gramsSum", 0)))
+            for n in nl.get("nutrients", []):
+                if n.get("nutrient") == "PROTEIN":
+                    totals["protein_g"] += round(float(n.get("quantity", {}).get("gramsSum", 0)))
+
+        # Hydration rollup for today
+        hydration_points = client.daily_rollup(
+            "hydration-log", today.isoformat(), tomorrow.isoformat())
+        for pt in hydration_points:
+            hl = pt.get("hydrationLog", {})
+            totals["water_ml"] += round(float(hl.get("amountConsumed", {}).get("millilitersSum", 0)))
+
+    except Exception:
+        # Fallback to local DB
+        log.warning("Google Health rollup failed — falling back to local DB totals")
+        today_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_utc = today_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with db.connect() as conn:
+            rows = conn.execute(
+                "SELECT content FROM insights WHERE user_id = ? AND kind = 'food_log' AND ts >= ?",
+                (user_id, cutoff_utc),
+            ).fetchall()
+        for row in rows:
+            try:
+                c = json.loads(row["content"])
+            except (json.JSONDecodeError, ValueError):
+                continue
+            totals["kcal"] += round(_num(c.get("calories_kcal")))
+            totals["protein_g"] += round(_num(c.get("protein_g")))
+            totals["fat_g"] += round(_num(c.get("total_fat_g")))
+            totals["carbs_g"] += round(_num(c.get("total_carbohydrate_g")))
+            if c.get("type") == "drink":
+                totals["water_ml"] += round(_num(c.get("volume_ml")))
+
     return totals
 
 
-def _daily_total_label(user_id: str, lang: str) -> str | None:
-    """Build a '📊 วันนี้: 1,240 kcal · 45g protein · 1,200 ml' summary line."""
-    t = _today_nutrition_totals(user_id)
-    if t["kcal"] <= 0 and t["water_ml"] <= 0:
-        return None
-    parts = []
-    if t["kcal"] > 0:
-        parts.append(f"{t['kcal']:,} kcal")
-    if t["protein_g"] > 0:
-        parts.append(f"{t['protein_g']}g {'protein' if lang == 'en' else 'โปรตีน'}")
-    if t["water_ml"] > 0:
-        parts.append(f"{t['water_ml']:,} ml {'water' if lang == 'en' else 'น้ำ'}")
-    prefix = "📊 Today" if lang == "en" else "📊 วันนี้"
-    return f"{prefix}: {' · '.join(parts)}"
+# Default daily nutrition targets (user can override via chat "ตั้งเป้า ...")
+_DEFAULT_TARGETS = {
+    "kcal": 2000,
+    "protein_g": 120,
+    "fat_g": 65,
+    "carbs_g": 250,
+    "water_ml": 2000,
+}
+
+
+def _get_daily_targets(user_id: str) -> dict:
+    """Load the user's daily nutrition targets from the goals table.
+    Falls back to _DEFAULT_TARGETS for any missing keys."""
+    targets = dict(_DEFAULT_TARGETS)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM goals WHERE user_id = ? AND key = 'daily_nutrition_targets'",
+            (user_id,),
+        ).fetchone()
+    if row:
+        try:
+            user_targets = json.loads(row["value_json"])
+            for k in targets:
+                if k in user_targets and user_targets[k]:
+                    targets[k] = int(float(user_targets[k]))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return targets
+
+
+def get_daily_progress(user_id: str) -> dict:
+    """Get today's progress: current totals vs targets.
+
+    Returns {"current": {...}, "targets": {...}, "lang": "th"|"en"}.
+    """
+    return {
+        "current": _today_nutrition_totals(user_id),
+        "targets": _get_daily_targets(user_id),
+        "lang": _lang_code(_get_language(user_id)),
+    }
 
 
 def _num(x) -> float:
@@ -490,7 +548,6 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
             name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
             highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
-            meal_label=_meal_label_for(analysis, lang),
         )
         return FlexReply(f"💧 {name}", bubble), rowid
 
@@ -519,7 +576,6 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
         highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
         synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
-        meal_label=_meal_label_for(analysis, lang),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1012,7 +1068,6 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         sync_label=labels["synced"] if synced else labels["not_synced"],
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
-        meal_label=_meal_label_for(analysis, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1078,7 +1133,6 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
         sync_label=sync_label,
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
-        meal_label=_meal_label_for(analysis, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"💧 {name}", bubble), rowid
 

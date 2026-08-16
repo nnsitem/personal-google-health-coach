@@ -471,27 +471,28 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      highlight: tuple[str, str], rows: list[tuple[str, str]],
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
-                     image_url: str | None = None,
-                     meal_label: str | None = None) -> dict:
+                     image_url: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
-    Layout (top to bottom): optional hero photo, a small uppercase kicker
-    ("NUTRITION LOG" / "HYDRATION LOG") in the type's accent color, the
-    logged item's name as a bold title, optional meal slot + time tags,
-    a colored highlight badge for the single most important stat (kcal for
-    food, volume for drinks), the rest of the macros as receipt-style itemized
-    rows, an optional muted notes line, and a footer with STATUS row + optional
-    daily running total.
+    Layout (top to bottom): optional hero photo, the logged item's name as a
+    bold title (quantity stripped since it's shown in the badge), a colored
+    highlight badge for the single most important stat (kcal for food, volume
+    for drinks), the rest of the macros as receipt-style itemized rows, an
+    optional muted notes line, and a footer STATUS row.
     """
+    import re as _re
     highlight_icon, highlight_value = highlight
 
+    # Strip quantity from name — e.g. "ชาเยอร์บามาเต (750ml)" → "ชาเยอร์บามาเต"
+    # Removes trailing parenthesized numbers/units like (1 โคน), (750ml), (2 glasses)
+    display_name = _re.sub(r'\s*\([\d.,]+\s*[^)]*\)\s*$', '', name).strip() or name
+
     body_contents = [
-        _kicker(kicker, accent_color),
-        {"type": "text", "text": name, "weight": "bold", "size": "xl",
-         "wrap": True, "color": TEXT_DARK, "margin": "xs"},
+        {"type": "text", "text": display_name, "weight": "bold", "size": "xl",
+         "wrap": True, "color": TEXT_DARK},
     ]
 
-    # Build the highlight badge row: kcal/ml badge on the left, meal slot on the right
+    # Highlight badge row (kcal/ml badge only — no meal slot)
     badge_row_contents = [
         {
             "type": "box",
@@ -508,12 +509,6 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
             ],
         },
     ]
-    if meal_label:
-        badge_row_contents.append({"type": "filler"})
-        badge_row_contents.append(
-            {"type": "text", "text": meal_label, "size": "xs", "color": TEXT_MUTED,
-             "align": "end", "gravity": "center", "wrap": False, "flex": 0},
-        )
 
     body_contents.append({
         "type": "box",
@@ -577,43 +572,97 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
     return bubble
 
 
-def build_daily_total_bubble(*, kcal: int, protein_g: int, water_ml: int,
-                             lang: str = "en") -> dict:
-    """A compact daily running-total card sent as a separate message after each
-    food/drink log. Shows today's cumulative calories, protein, and water."""
-    if lang == "th":
-        title = "📊 สรุปวันนี้"
-        kcal_label = "พลังงาน"
-        protein_label = "โปรตีน"
-        water_label = "น้ำ"
-    else:
-        title = "📊 Today's Total"
-        kcal_label = "Energy"
-        protein_label = "Protein"
-        water_label = "Water"
+def build_daily_progress_bubble(*, current: dict, targets: dict,
+                                lang: str = "en") -> dict | None:
+    """A daily nutrition progress card showing current vs target with progress bars.
+
+    `current`: {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}
+    `targets`: same keys with the daily goal values.
+
+    Returns None when nothing has been consumed yet (all zeros).
+    """
+    if all(current.get(k, 0) <= 0 for k in ("kcal", "protein_g", "fat_g", "carbs_g", "water_ml")):
+        return None
+
+    title = "📊 สรุปวันนี้" if lang == "th" else "📊 Today's Progress"
+
+    # Nutrient row config: (key, emoji, label_th, label_en, unit)
+    nutrients = [
+        ("kcal", "🔥", "พลังงาน", "Energy", "kcal"),
+        ("protein_g", "💪", "โปรตีน", "Protein", "g"),
+        ("carbs_g", "🍞", "คาร์บ", "Carbs", "g"),
+        ("fat_g", "🥑", "ไขมัน", "Fat", "g"),
+        ("water_ml", "💧", "น้ำ", "Water", "ml"),
+    ]
 
     rows = []
-    if kcal > 0:
-        rows.append({"type": "box", "layout": "baseline", "contents": [
-            {"type": "text", "text": f"🔥 {kcal_label}", "size": "sm", "color": TEXT_MUTED, "flex": 3},
-            {"type": "text", "text": f"{kcal:,} kcal", "size": "sm", "color": TEXT_DARK,
-             "align": "end", "flex": 2, "weight": "bold"},
-        ]})
-    if protein_g > 0:
-        rows.append({"type": "box", "layout": "baseline", "contents": [
-            {"type": "text", "text": f"💪 {protein_label}", "size": "sm", "color": TEXT_MUTED, "flex": 3},
-            {"type": "text", "text": f"{protein_g} g", "size": "sm", "color": TEXT_DARK,
-             "align": "end", "flex": 2, "weight": "bold"},
-        ]})
-    if water_ml > 0:
-        rows.append({"type": "box", "layout": "baseline", "contents": [
-            {"type": "text", "text": f"💧 {water_label}", "size": "sm", "color": TEXT_MUTED, "flex": 3},
-            {"type": "text", "text": f"{water_ml:,} ml", "size": "sm", "color": TEXT_DARK,
-             "align": "end", "flex": 2, "weight": "bold"},
+    for key, emoji, label_th, label_en, unit in nutrients:
+        cur = current.get(key, 0)
+        tgt = targets.get(key, 0)
+        if tgt <= 0:
+            continue
+        pct = min(cur / tgt, 1.0)  # cap at 100% for the bar
+        label = label_th if lang == "th" else label_en
+        # Determine bar color: green if under target, orange if over
+        bar_color = "#2E7D5B" if cur <= tgt else "#B45309"
+        remaining = max(0, tgt - cur)
+
+        # Progress row: label + current/target on the right
+        if unit == "kcal":
+            value_text = f"{cur:,}/{tgt:,}"
+        elif unit == "ml":
+            value_text = f"{cur:,}/{tgt:,}"
+        else:
+            value_text = f"{cur}/{tgt}"
+
+        rows.append({"type": "box", "layout": "vertical", "spacing": "xs",
+                     "margin": "md" if rows else "sm", "contents": [
+            # Label row: emoji+name on left, value on right
+            {"type": "box", "layout": "horizontal", "contents": [
+                {"type": "text", "text": f"{emoji} {label}", "size": "xs",
+                 "color": TEXT_MUTED, "flex": 1},
+                {"type": "text", "text": f"{value_text} {unit}", "size": "xs",
+                 "color": TEXT_DARK, "weight": "bold", "align": "end", "flex": 0},
+            ]},
+            # Progress bar
+            {"type": "box", "layout": "horizontal", "height": "6px",
+             "cornerRadius": "3px", "backgroundColor": "#E5E7EB", "contents": [
+                {"type": "box", "layout": "vertical",
+                 "width": f"{max(1, round(pct * 100))}%",
+                 "backgroundColor": bar_color,
+                 "contents": [{"type": "filler"}]},
+                {"type": "filler"},
+            ]},
         ]})
 
     if not rows:
         return None
+
+    # Remaining summary at the bottom
+    remain_parts = []
+    for key, emoji, label_th, label_en, unit in nutrients:
+        remaining = max(0, targets.get(key, 0) - current.get(key, 0))
+        if remaining > 0 and targets.get(key, 0) > 0:
+            lbl = label_th if lang == "th" else label_en
+            if unit == "kcal" or unit == "ml":
+                remain_parts.append(f"{remaining:,}{unit}")
+            else:
+                remain_parts.append(f"{remaining}g {lbl}")
+
+    footer_text = ""
+    if remain_parts:
+        prefix = "เหลืออีก" if lang == "th" else "Remaining"
+        footer_text = f"{prefix}: {' · '.join(remain_parts[:3])}"  # show top 3
+
+    contents = [
+        {"type": "text", "text": title, "size": "sm", "weight": "bold",
+         "color": TEXT_DARK},
+        *rows,
+    ]
+    if footer_text:
+        contents.append({"type": "separator", "margin": "md"})
+        contents.append({"type": "text", "text": footer_text, "size": "xxs",
+                         "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
 
     return {
         "type": "bubble",
@@ -622,11 +671,6 @@ def build_daily_total_bubble(*, kcal: int, protein_g: int, water_ml: int,
             "type": "box",
             "layout": "vertical",
             "paddingAll": "14px",
-            "spacing": "sm",
-            "contents": [
-                {"type": "text", "text": title, "size": "sm", "weight": "bold",
-                 "color": TEXT_DARK},
-                *rows,
-            ],
+            "contents": contents,
         },
     }

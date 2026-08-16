@@ -531,19 +531,19 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
         mime = _detect_image_mime(image_bytes)
         reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
         messages_to_send = [reply]
-        # Append a separate daily-total card
+        # Append a separate daily progress card
         try:
-            from coach.food import _today_nutrition_totals, _lang_code, _get_language
-            from coach.flex import FlexReply, build_daily_total_bubble
+            from coach.food import get_daily_progress
+            from coach.flex import FlexReply, build_daily_progress_bubble
             if isinstance(reply, FlexReply):
-                lang = _lang_code(_get_language(user_id))
-                totals = _today_nutrition_totals(user_id)
-                total_bubble = build_daily_total_bubble(
-                    kcal=totals["kcal"], protein_g=totals["protein_g"],
-                    water_ml=totals["water_ml"], lang=lang,
+                progress = get_daily_progress(user_id)
+                progress_bubble = build_daily_progress_bubble(
+                    current=progress["current"],
+                    targets=progress["targets"],
+                    lang=progress["lang"],
                 )
-                if total_bubble:
-                    messages_to_send.append(FlexReply("📊 Today's total", total_bubble))
+                if progress_bubble:
+                    messages_to_send.append(FlexReply("📊 Daily progress", progress_bubble))
         except Exception:
             pass
         sent_ids = _send_multi(user_id, messages_to_send, reply_token)

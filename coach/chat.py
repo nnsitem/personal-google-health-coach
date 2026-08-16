@@ -507,18 +507,18 @@ def handle_message(user_id: str, user_text: str,
         from coach.flex import FlexReply
         if isinstance(status, FlexReply):
             extra_flex.append(status)
-            # Append a separate daily-total card after each food/drink log
+            # Append a separate daily progress card after each food/drink log
             try:
-                from coach.food import _today_nutrition_totals, _lang_code, _get_language
-                from coach.flex import build_daily_total_bubble
-                lang = _lang_code(_get_language(user_id))
-                totals = _today_nutrition_totals(user_id)
-                total_bubble = build_daily_total_bubble(
-                    kcal=totals["kcal"], protein_g=totals["protein_g"],
-                    water_ml=totals["water_ml"], lang=lang,
+                from coach.food import get_daily_progress
+                from coach.flex import build_daily_progress_bubble
+                progress = get_daily_progress(user_id)
+                progress_bubble = build_daily_progress_bubble(
+                    current=progress["current"],
+                    targets=progress["targets"],
+                    lang=progress["lang"],
                 )
-                if total_bubble:
-                    extra_flex.append(FlexReply("📊 Today's total", total_bubble))
+                if progress_bubble:
+                    extra_flex.append(FlexReply("📊 Daily progress", progress_bubble))
             except Exception:
                 pass  # non-critical — don't break the log flow
         elif status:
