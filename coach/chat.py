@@ -71,9 +71,18 @@ Special abilities (use these directives on their own line at the END of your rep
   The system appends the result of the deletion.
 - To log food or drinks the user describes in words (e.g. "log: grilled pork 3 skewers with sticky rice",
   "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว"):
-  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
-  [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
+  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
+  [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
   Rules for these two directives:
+  - coaching_suggestion is REQUIRED, never omit or leave empty. Use the "Today's
+    nutrition so far vs daily target" context (current + this item's own
+    nutrition) to say what's actually useful next: name the nutrient furthest
+    behind target with a concrete food/drink idea, or briefly congratulate if
+    targets are basically met. One short sentence in the user's language,
+    starting with a single relevant emoji (💡 tip, 🎉 goals met, 💧 water-specific).
+    Don't restate numbers already in this directive's own fields — focus on the
+    gap or the win. This text is shown on the log card, separate from your
+    visible reply, so don't duplicate it there.
   - food_name_en / food_name_local / drink_name_en / drink_name_local: write CLEAN,
     PROPERLY FORMATTED display names — not the user's raw shorthand. Capitalize brand
     names, use correct spelling, include quantity in parentheses. Examples:
@@ -356,6 +365,19 @@ def _build_context_message(user_id: str) -> str:
             f"{json.dumps(food_logs, separators=(',', ':'), ensure_ascii=False)}"
         )
 
+    # Today's nutrition/hydration totals vs target — needed to ground the
+    # LOG_FOOD/LOG_DRINK coaching_suggestion in real numbers, not guesses.
+    try:
+        from coach.food import get_daily_progress
+        progress = get_daily_progress(user_id)
+        parts.append(
+            "Today's nutrition so far vs daily target (kcal/protein_g/carbs_g/fat_g/water_ml): "
+            f"current={json.dumps(progress['current'], separators=(',', ':'))} "
+            f"target={json.dumps(progress['targets'], separators=(',', ':'))}"
+        )
+    except Exception:
+        log.exception("failed to load daily nutrition progress for chat context")
+
     if goals:
         parts.append(f"User goals: {json.dumps(goals, separators=(',', ':'))}")
     if memory:
@@ -614,6 +636,8 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
     def _parse_log(kind: str, inner: str) -> None:
         try:
             data = json.loads(inner)
+            if kind in ("food", "drink") and isinstance(data, dict) and not data.get("coaching_suggestion"):
+                log.warning("%s directive missing coaching_suggestion", kind)
             logs.append((kind, data if isinstance(data, dict) else None))
         except (json.JSONDecodeError, ValueError):
             log.warning("unparseable %s directive: %s", kind, inner[:200])

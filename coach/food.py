@@ -567,11 +567,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         if fat > 0:
             rows.append((labels["fat"], f"{fat} g"))
 
-        lang = _lang_code(_get_language(user_id))
         bubble = build_log_bubble(
             name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
             highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
+            coaching_note=analysis.get("coaching_suggestion"),
         )
         return FlexReply(f"💧 {name}", bubble), rowid
 
@@ -599,6 +599,7 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
         highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
         synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
+        coaching_note=analysis.get("coaching_suggestion"),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
