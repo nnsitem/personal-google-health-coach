@@ -13,8 +13,8 @@ colored header bar with a kicker above a bold headline.
 
 COLOR_DAILY = "#2E7D5B"
 COLOR_WEEKLY = "#3D5A80"
-COLOR_FOOD = "#B45309"
-COLOR_DRINK = "#1D4ED8"
+COLOR_FOOD = "#FF9100"
+COLOR_DRINK = "#3A86FF"
 COLOR_SYNCED = "#2E7D5B"
 COLOR_NOT_SYNCED = "#C0392B"
 TEXT_MUTED = "#8A8A8A"
@@ -603,8 +603,8 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
             continue
         pct = min(cur / tgt, 1.0)  # cap at 100% for the bar
         label = label_th if lang == "th" else label_en
-        # Determine bar color: green if under target, orange if over
-        bar_color = "#2E7D5B" if cur <= tgt else "#B45309"
+        # Determine bar color: green when goal met, warm yellow while in progress
+        bar_color = "#7DCCAD" if cur >= tgt else "#FFC349"
         remaining = max(0, tgt - cur)
 
         # Progress row: label + current/target on the right
@@ -655,8 +655,6 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
         footer_text = f"{prefix}: {' · '.join(remain_parts[:3])}"  # show top 3
 
     contents = [
-        {"type": "text", "text": title, "size": "sm", "weight": "bold",
-         "color": TEXT_DARK},
         *rows,
     ]
     if footer_text:
