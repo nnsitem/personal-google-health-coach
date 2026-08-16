@@ -531,7 +531,7 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
         mime = _detect_image_mime(image_bytes)
         reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
         messages_to_send = [reply]
-        # Append a separate daily progress card
+        # Combine log + progress into a carousel (swipe to see progress)
         try:
             from coach.food import get_daily_progress
             from coach.flex import FlexReply, build_daily_progress_bubble
@@ -543,7 +543,11 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
                     lang=progress["lang"],
                 )
                 if progress_bubble:
-                    messages_to_send.append(FlexReply("📊 Daily progress", progress_bubble))
+                    carousel = {
+                        "type": "carousel",
+                        "contents": [reply.bubble, progress_bubble],
+                    }
+                    messages_to_send = [FlexReply(reply.alt_text, carousel)]
         except Exception:
             pass
         sent_ids = _send_multi(user_id, messages_to_send, reply_token)

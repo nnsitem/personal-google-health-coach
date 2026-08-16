@@ -545,16 +545,18 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
             "wrap": True, "margin": "lg",
         })
 
-    footer_contents = [{
-        "type": "box",
-        "layout": "baseline",
-        "contents": [
-            {"type": "text", "text": "STATUS", "size": "xs", "color": TEXT_MUTED, "flex": 1},
-            {"type": "text", "text": sync_label, "size": "xs", "wrap": True, "weight": "bold",
-             "align": "end", "flex": 2,
-             "color": COLOR_SYNCED if synced else COLOR_NOT_SYNCED},
-        ],
-    }]
+    footer_contents = []
+    # Only show footer when there's a problem (sync failed or low confidence)
+    if not synced:
+        footer_contents.append({
+            "type": "box",
+            "layout": "baseline",
+            "contents": [
+                {"type": "text", "text": "STATUS", "size": "xs", "color": TEXT_MUTED, "flex": 1},
+                {"type": "text", "text": sync_label, "size": "xs", "wrap": True, "weight": "bold",
+                 "align": "end", "flex": 2, "color": COLOR_NOT_SYNCED},
+            ],
+        })
     if low_conf_label:
         footer_contents.append({"type": "text", "text": low_conf_label, "size": "xs",
                                 "color": TEXT_MUTED, "wrap": True, "margin": "xs"})
@@ -563,12 +565,21 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         "type": "bubble",
         "size": "kilo",
         "body": {"type": "box", "layout": "vertical", "paddingAll": "16px", "contents": body_contents},
-        "footer": {"type": "box", "layout": "vertical", "paddingAll": "12px",
-                  "spacing": "xs", "contents": footer_contents},
     }
+    if footer_contents:
+        bubble["footer"] = {"type": "box", "layout": "vertical", "paddingAll": "12px",
+                            "spacing": "xs", "contents": footer_contents}
     if image_url:
         bubble["hero"] = {"type": "image", "url": image_url, "size": "full",
                           "aspectRatio": "20:13", "aspectMode": "cover"}
+    else:
+        # Colored accent strip at top for text-based logs (no photo)
+        bubble["header"] = {
+            "type": "box", "layout": "vertical",
+            "backgroundColor": accent_color,
+            "height": "6px", "paddingAll": "0px",
+            "contents": [{"type": "filler"}],
+        }
     return bubble
 
 
@@ -605,9 +616,12 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
         label = label_th if lang == "th" else label_en
         # Determine bar color: green when goal met, warm yellow while in progress
         bar_color = "#7DCCAD" if cur >= tgt else "#FFC349"
+        goal_met = cur >= tgt
         remaining = max(0, tgt - cur)
+        pct_int = min(100, round(pct * 100))
 
-        # Progress row: label + current/target on the right
+        # Progress row: label + percentage on the right
+        pct_display = f"🎉 {pct_int}%" if goal_met else f"{pct_int}%"
         if unit == "kcal":
             value_text = f"{cur:,}/{tgt:,}"
         elif unit == "ml":
@@ -617,11 +631,11 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
 
         rows.append({"type": "box", "layout": "vertical", "spacing": "xs",
                      "margin": "md" if rows else "sm", "contents": [
-            # Label row: emoji+name on left, value on right
+            # Label row: emoji+name on left, value + pct on right
             {"type": "box", "layout": "horizontal", "contents": [
                 {"type": "text", "text": f"{emoji} {label}", "size": "xs",
                  "color": TEXT_MUTED, "flex": 1},
-                {"type": "text", "text": f"{value_text} {unit}", "size": "xs",
+                {"type": "text", "text": f"{value_text} {unit} ({pct_display})", "size": "xs",
                  "color": TEXT_DARK, "weight": "bold", "align": "end", "flex": 0},
             ]},
             # Progress bar

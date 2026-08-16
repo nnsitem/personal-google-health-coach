@@ -506,8 +506,7 @@ def handle_message(user_id: str, user_text: str,
             status = LABELS.get(_lang_code(db.get_user_language(user_id)), LABELS["en"])["not_synced"]
         from coach.flex import FlexReply
         if isinstance(status, FlexReply):
-            extra_flex.append(status)
-            # Append a separate daily progress card after each food/drink log
+            # Try to combine log card + daily progress into a single carousel
             try:
                 from coach.food import get_daily_progress
                 from coach.flex import build_daily_progress_bubble
@@ -518,9 +517,16 @@ def handle_message(user_id: str, user_text: str,
                     lang=progress["lang"],
                 )
                 if progress_bubble:
-                    extra_flex.append(FlexReply("📊 Daily progress", progress_bubble))
+                    # Wrap both bubbles in a carousel container
+                    carousel = {
+                        "type": "carousel",
+                        "contents": [status.bubble, progress_bubble],
+                    }
+                    extra_flex.append(FlexReply(status.alt_text, carousel))
+                else:
+                    extra_flex.append(status)
             except Exception:
-                pass  # non-critical — don't break the log flow
+                extra_flex.append(status)  # fallback: just the log card
         elif status:
             reply = reply + "\n\n" + status
 
