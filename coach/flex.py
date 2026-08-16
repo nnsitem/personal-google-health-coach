@@ -116,11 +116,14 @@ class FlexReply:
     """Wraps a Flex Message payload so a reply channel can carry either plain
     text or a Flex bubble through the same tuple/list contract."""
 
-    __slots__ = ("alt_text", "bubble")
+    __slots__ = ("alt_text", "bubble", "coaching_note")
 
-    def __init__(self, alt_text: str, bubble: dict):
+    def __init__(self, alt_text: str, bubble: dict, coaching_note: str | None = None):
         self.alt_text = alt_text[:400]  # LINE altText hard limit
         self.bubble = bubble
+        # Carries a photo-log's AI coaching tip through to the caller, which
+        # places it on the progress card (not this bubble) for photo logs.
+        self.coaching_note = coaching_note
 
 
 def _kicker(text: str, color: str) -> dict:
@@ -584,7 +587,8 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
 
 
 def build_daily_progress_bubble(*, current: dict, targets: dict,
-                                lang: str = "en") -> dict | None:
+                                lang: str = "en",
+                                coaching_note: str | None = None) -> dict | None:
     """A daily nutrition progress card showing current vs target with progress bars.
 
     `current`: {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}
@@ -674,6 +678,11 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
         contents.append({"type": "separator", "margin": "md"})
         contents.append({"type": "text", "text": footer_text, "size": "xxs",
                          "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
+
+    if coaching_note:
+        contents.append({"type": "separator", "margin": "md"})
+        contents.append({"type": "text", "text": coaching_note, "size": "xs",
+                         "color": "#555555", "wrap": True, "margin": "sm"})
 
     return {
         "type": "bubble",

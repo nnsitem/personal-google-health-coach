@@ -549,6 +549,7 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
                     current=progress["current"],
                     targets=progress["targets"],
                     lang=progress["lang"],
+                    coaching_note=reply.coaching_note,
                 )
                 if progress_bubble:
                     carousel = {

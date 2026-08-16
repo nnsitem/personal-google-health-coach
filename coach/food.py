@@ -1093,9 +1093,11 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         sync_label=labels["synced"] if synced else labels["not_synced"],
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
-        coaching_note=analysis.get("coaching_suggestion"),
     )
-    return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
+    # Photo logs show the coaching tip on the progress card (next carousel
+    # page), not this log card — carried via FlexReply for the caller to place.
+    return FlexReply(f"🍽️ {name} — {cal} kcal", bubble,
+                     coaching_note=analysis.get("coaching_suggestion")), rowid
 
 
 def _handle_drink(user_id: str, analysis: dict, labels: dict,
@@ -1159,9 +1161,9 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
         sync_label=sync_label,
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
-        coaching_note=analysis.get("coaching_suggestion"),
     )
-    return FlexReply(f"💧 {name}", bubble), rowid
+    return FlexReply(f"💧 {name}", bubble,
+                     coaching_note=analysis.get("coaching_suggestion")), rowid
 
 
 if __name__ == "__main__":
