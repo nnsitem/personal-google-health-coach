@@ -471,7 +471,8 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      highlight: tuple[str, str], rows: list[tuple[str, str]],
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
-                     image_url: str | None = None) -> dict:
+                     image_url: str | None = None,
+                     coaching_note: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, the logged item's name as a
@@ -543,6 +544,13 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         body_contents.append({
             "type": "text", "text": notes, "size": "xs", "color": TEXT_MUTED,
             "wrap": True, "margin": "lg",
+        })
+
+    if coaching_note:
+        body_contents.append({"type": "separator", "margin": "lg"})
+        body_contents.append({
+            "type": "text", "text": coaching_note, "size": "xs", "color": "#555555",
+            "wrap": True, "margin": "md",
         })
 
     footer_contents = []

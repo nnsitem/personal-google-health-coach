@@ -38,7 +38,8 @@ If it's FOOD, use this shape:
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
-  "notes": "one short sentence on assumptions (portion size, ingredients)"
+  "notes": "one short sentence on assumptions (portion size, ingredients)",
+  "coaching_suggestion": "one short, specific coaching tip (see rules below)"
 }
 
 If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
@@ -54,7 +55,8 @@ If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
-  "notes": "one short sentence on assumptions (how many containers, size each)"
+  "notes": "one short sentence on assumptions (how many containers, size each)",
+  "coaching_suggestion": "one short, specific coaching tip (see rules below)"
 }
 
 DRINK volume rules (important — read carefully):
@@ -73,6 +75,19 @@ DRINK volume rules (important — read carefully):
 
 Estimate realistic values for what's shown. If there is no drink container at all
 in the photo, set "type" to "unknown".
+
+"coaching_suggestion" rules:
+- You'll be given the user's totals already logged today (before this item) and
+  their daily targets. Use those REAL numbers, plus this item's own estimated
+  nutrition, to decide what's most useful to say next.
+- Be specific and grounded in the numbers (e.g. name the nutrient furthest behind
+  target and roughly how much is left), not generic filler like "eat healthy."
+- If a nutrient is clearly behind target, suggest one concrete food/drink for
+  later today. If all targets are basically met, give brief encouragement instead.
+- One short sentence, natural and conversational, starting with a single relevant
+  emoji (💡 for a tip, 🎉 if all targets are met, 💧 if it's about water).
+- Skip restating numbers already visible on the card (calories/macros of this
+  item) — focus on the gap or the win.
 """
 
 
@@ -293,12 +308,18 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
     if not api_key:
         raise RuntimeError("No Gemini API key configured")
 
+    current = _today_nutrition_totals(user_id)
+    targets = _get_daily_targets(user_id)
+    totals_line = ", ".join(f"{k}: {current.get(k, 0)}/{v}" for k, v in targets.items())
+
     # The '*_en' name must be English (used for the Google Health log); the
-    # '*_local' name and 'notes' must be in the user's language (for the reply).
+    # '*_local' name, 'notes', and 'coaching_suggestion' must be in the user's
+    # language (for the reply).
     prompt = FOOD_VISION_PROMPT + (
-        f"\n\nThe user's language is {language}. Write '*_local' fields and 'notes' "
-        f"in {language}. Always keep '*_en' fields in English, and keep all JSON keys "
-        "and the 'type' value exactly as specified in English."
+        f"\n\nThe user's language is {language}. Write '*_local' fields, 'notes', and "
+        f"'coaching_suggestion' in {language}. Always keep '*_en' fields in English, "
+        "and keep all JSON keys and the 'type' value exactly as specified in English.\n\n"
+        f"Already logged today (before this item), vs daily target: {totals_line}"
     )
 
     image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
@@ -1067,6 +1088,7 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         sync_label=labels["synced"] if synced else labels["not_synced"],
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
+        coaching_note=analysis.get("coaching_suggestion"),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1132,6 +1154,7 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
         sync_label=sync_label,
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
+        coaching_note=analysis.get("coaching_suggestion"),
     )
     return FlexReply(f"💧 {name}", bubble), rowid
 
