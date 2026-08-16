@@ -515,6 +515,7 @@ def handle_message(user_id: str, user_text: str,
                     current=progress["current"],
                     targets=progress["targets"],
                     lang=progress["lang"],
+                    show_suggestion=False,  # suggestion is on the log card for text logs
                 )
                 if progress_bubble:
                     # Wrap both bubbles in a carousel container

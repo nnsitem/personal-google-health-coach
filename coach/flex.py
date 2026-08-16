@@ -471,7 +471,8 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      highlight: tuple[str, str], rows: list[tuple[str, str]],
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
-                     image_url: str | None = None) -> dict:
+                     image_url: str | None = None,
+                     suggestion: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, the logged item's name as a
@@ -543,6 +544,14 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         body_contents.append({
             "type": "text", "text": notes, "size": "xs", "color": TEXT_MUTED,
             "wrap": True, "margin": "lg",
+        })
+
+    # Suggestion (for manual text logs — fills the empty space)
+    if suggestion:
+        body_contents.append({"type": "separator", "margin": "lg"})
+        body_contents.append({
+            "type": "text", "text": suggestion, "size": "xs", "color": "#555555",
+            "wrap": True, "margin": "md",
         })
 
     footer_contents = []
@@ -629,7 +638,8 @@ def _progress_suggestion(current: dict, targets: dict, lang: str) -> str:
 
 
 def build_daily_progress_bubble(*, current: dict, targets: dict,
-                                lang: str = "en") -> dict | None:
+                                lang: str = "en",
+                                show_suggestion: bool = True) -> dict | None:
     """A daily nutrition progress card showing current vs target with progress bars.
 
     `current`: {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}
@@ -721,7 +731,7 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
                          "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
 
     # Contextual suggestion based on what's most deficient
-    suggestion = _progress_suggestion(current, targets, lang)
+    suggestion = _progress_suggestion(current, targets, lang) if show_suggestion else ""
     if suggestion:
         contents.append({"type": "separator", "margin": "md"})
         contents.append({"type": "text", "text": suggestion, "size": "xs",
