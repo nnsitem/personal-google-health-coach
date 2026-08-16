@@ -530,7 +530,23 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
         image_bytes = get_image_content(message_id)
         mime = _detect_image_mime(image_bytes)
         reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
-        sent_ids = _send_multi(user_id, [reply], reply_token)
+        messages_to_send = [reply]
+        # Append a separate daily-total card
+        try:
+            from coach.food import _today_nutrition_totals, _lang_code, _get_language
+            from coach.flex import FlexReply, build_daily_total_bubble
+            if isinstance(reply, FlexReply):
+                lang = _lang_code(_get_language(user_id))
+                totals = _today_nutrition_totals(user_id)
+                total_bubble = build_daily_total_bubble(
+                    kcal=totals["kcal"], protein_g=totals["protein_g"],
+                    water_ml=totals["water_ml"], lang=lang,
+                )
+                if total_bubble:
+                    messages_to_send.append(FlexReply("📊 Today's total", total_bubble))
+        except Exception:
+            pass
+        sent_ids = _send_multi(user_id, messages_to_send, reply_token)
         # Map the coach's confirmation AND the user's own photo message — a
         # quote-reply to either should target this log.
         _map_sent_log(user_id, sent_ids + [message_id],

@@ -473,8 +473,7 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      low_conf_label: str | None = None,
                      image_url: str | None = None,
                      meal_label: str | None = None,
-                     time_label: str | None = None,
-                     daily_total: str | None = None) -> dict:
+                     time_label: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, a small uppercase kicker
@@ -566,10 +565,6 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
     if low_conf_label:
         footer_contents.append({"type": "text", "text": low_conf_label, "size": "xs",
                                 "color": TEXT_MUTED, "wrap": True, "margin": "xs"})
-    if daily_total:
-        footer_contents.append({"type": "separator", "margin": "sm"})
-        footer_contents.append({"type": "text", "text": daily_total, "size": "xs",
-                                "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
 
     bubble = {
         "type": "bubble",
@@ -582,3 +577,58 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         bubble["hero"] = {"type": "image", "url": image_url, "size": "full",
                           "aspectRatio": "20:13", "aspectMode": "cover"}
     return bubble
+
+
+def build_daily_total_bubble(*, kcal: int, protein_g: int, water_ml: int,
+                             lang: str = "en") -> dict:
+    """A compact daily running-total card sent as a separate message after each
+    food/drink log. Shows today's cumulative calories, protein, and water."""
+    if lang == "th":
+        title = "📊 สรุปวันนี้"
+        kcal_label = "พลังงาน"
+        protein_label = "โปรตีน"
+        water_label = "น้ำ"
+    else:
+        title = "📊 Today's Total"
+        kcal_label = "Energy"
+        protein_label = "Protein"
+        water_label = "Water"
+
+    rows = []
+    if kcal > 0:
+        rows.append({"type": "box", "layout": "baseline", "contents": [
+            {"type": "text", "text": f"🔥 {kcal_label}", "size": "sm", "color": TEXT_MUTED, "flex": 3},
+            {"type": "text", "text": f"{kcal:,} kcal", "size": "sm", "color": TEXT_DARK,
+             "align": "end", "flex": 2, "weight": "bold"},
+        ]})
+    if protein_g > 0:
+        rows.append({"type": "box", "layout": "baseline", "contents": [
+            {"type": "text", "text": f"💪 {protein_label}", "size": "sm", "color": TEXT_MUTED, "flex": 3},
+            {"type": "text", "text": f"{protein_g} g", "size": "sm", "color": TEXT_DARK,
+             "align": "end", "flex": 2, "weight": "bold"},
+        ]})
+    if water_ml > 0:
+        rows.append({"type": "box", "layout": "baseline", "contents": [
+            {"type": "text", "text": f"💧 {water_label}", "size": "sm", "color": TEXT_MUTED, "flex": 3},
+            {"type": "text", "text": f"{water_ml:,} ml", "size": "sm", "color": TEXT_DARK,
+             "align": "end", "flex": 2, "weight": "bold"},
+        ]})
+
+    if not rows:
+        return None
+
+    return {
+        "type": "bubble",
+        "size": "kilo",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "14px",
+            "spacing": "sm",
+            "contents": [
+                {"type": "text", "text": title, "size": "sm", "weight": "bold",
+                 "color": TEXT_DARK},
+                *rows,
+            ],
+        },
+    }

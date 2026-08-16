@@ -490,12 +490,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
 
         lang = _lang_code(_get_language(user_id))
         meal_label, time_label = _meal_and_time_labels(analysis, lang)
-        daily_total = _daily_total_label(user_id, lang)
         bubble = build_log_bubble(
             name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
             highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
-            meal_label=meal_label, time_label=time_label, daily_total=daily_total,
+            meal_label=meal_label, time_label=time_label,
         )
         return FlexReply(f"💧 {name}", bubble), rowid
 
@@ -521,12 +520,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
     ]
     lang = _lang_code(_get_language(user_id))
     meal_label, time_label = _meal_and_time_labels(analysis, lang)
-    daily_total = _daily_total_label(user_id, lang)
     bubble = build_log_bubble(
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
         highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
         synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
-        meal_label=meal_label, time_label=time_label, daily_total=daily_total,
+        meal_label=meal_label, time_label=time_label,
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1021,7 +1019,6 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         image_url=image_url,
         meal_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[0],
         time_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[1],
-        daily_total=_daily_total_label(user_id, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1089,7 +1086,6 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
         image_url=image_url,
         meal_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[0],
         time_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[1],
-        daily_total=_daily_total_label(user_id, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"💧 {name}", bubble), rowid
 
