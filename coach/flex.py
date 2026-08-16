@@ -488,7 +488,7 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
     display_name = _re.sub(r'\s*\([\d.,]+\s*[^)]*\)\s*$', '', name).strip() or name
 
     body_contents = [
-        {"type": "text", "text": display_name, "weight": "bold", "size": "xl",
+        {"type": "text", "text": display_name, "weight": "bold", "size": "lg",
          "wrap": True, "color": TEXT_DARK},
     ]
 
