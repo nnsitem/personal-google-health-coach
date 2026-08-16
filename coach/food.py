@@ -119,13 +119,10 @@ _MEAL_LABEL = {
 }
 
 
-def _meal_and_time_labels(analysis: dict, lang: str) -> tuple[str | None, str | None]:
-    """Extract a displayable meal-slot label and time label from the analysis."""
+def _meal_label_for(analysis: dict, lang: str) -> str | None:
+    """Extract a displayable meal-slot label from the analysis."""
     meal_type = _explicit_meal_type(analysis)
-    meal_label = _MEAL_LABEL.get(lang, _MEAL_LABEL["en"]).get(meal_type) if meal_type else None
-    time_str = str(analysis.get("time") or "").strip()
-    time_label = f"⏰ {time_str}" if re.fullmatch(r"\d{1,2}:\d{2}", time_str) else None
-    return meal_label, time_label
+    return _MEAL_LABEL.get(lang, _MEAL_LABEL["en"]).get(meal_type) if meal_type else None
 
 
 def _today_nutrition_totals(user_id: str) -> dict:
@@ -489,12 +486,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
             rows.append((labels["fat"], f"{fat} g"))
 
         lang = _lang_code(_get_language(user_id))
-        meal_label, time_label = _meal_and_time_labels(analysis, lang)
         bubble = build_log_bubble(
             name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
             highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
-            meal_label=meal_label, time_label=time_label,
+            meal_label=_meal_label_for(analysis, lang),
         )
         return FlexReply(f"💧 {name}", bubble), rowid
 
@@ -519,12 +515,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         (labels["fat"], f"{fat} g"),
     ]
     lang = _lang_code(_get_language(user_id))
-    meal_label, time_label = _meal_and_time_labels(analysis, lang)
     bubble = build_log_bubble(
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
         highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
         synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
-        meal_label=meal_label, time_label=time_label,
+        meal_label=_meal_label_for(analysis, lang),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1017,8 +1012,7 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         sync_label=labels["synced"] if synced else labels["not_synced"],
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
-        meal_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[0],
-        time_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[1],
+        meal_label=_meal_label_for(analysis, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1084,8 +1078,7 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
         sync_label=sync_label,
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
-        meal_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[0],
-        time_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[1],
+        meal_label=_meal_label_for(analysis, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"💧 {name}", bubble), rowid
 

@@ -472,8 +472,7 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
                      image_url: str | None = None,
-                     meal_label: str | None = None,
-                     time_label: str | None = None) -> dict:
+                     meal_label: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, a small uppercase kicker
@@ -492,37 +491,36 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
          "wrap": True, "color": TEXT_DARK, "margin": "xs"},
     ]
 
-    # Optional meal slot + time tags (muted, below the title)
-    tags = []
+    # Build the highlight badge row: kcal/ml badge on the left, meal slot on the right
+    badge_row_contents = [
+        {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 0,
+            "backgroundColor": accent_color,
+            "cornerRadius": "8px",
+            "paddingAll": "6px",
+            "paddingStart": "10px",
+            "paddingEnd": "10px",
+            "contents": [
+                {"type": "text", "text": f"{highlight_icon} {highlight_value}",
+                 "size": "sm", "weight": "bold", "color": "#FFFFFF", "align": "center"},
+            ],
+        },
+    ]
     if meal_label:
-        tags.append(meal_label)
-    if time_label:
-        tags.append(time_label)
-    if tags:
-        body_contents.append({"type": "text", "text": " · ".join(tags), "size": "xs",
-                              "color": TEXT_MUTED, "margin": "xs", "wrap": False})
+        badge_row_contents.append({"type": "filler"})
+        badge_row_contents.append(
+            {"type": "text", "text": meal_label, "size": "xs", "color": TEXT_MUTED,
+             "align": "end", "gravity": "center", "wrap": False, "flex": 0},
+        )
 
     body_contents.append({
-            "type": "box",
-            "layout": "horizontal",
-            "margin": "md",
-            "contents": [
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "flex": 0,
-                    "backgroundColor": accent_color,
-                    "cornerRadius": "8px",
-                    "paddingAll": "6px",
-                    "paddingStart": "10px",
-                    "paddingEnd": "10px",
-                    "contents": [
-                        {"type": "text", "text": f"{highlight_icon} {highlight_value}",
-                         "size": "sm", "weight": "bold", "color": "#FFFFFF", "align": "center"},
-                    ],
-                },
-            ],
-        })
+        "type": "box",
+        "layout": "horizontal",
+        "margin": "md",
+        "contents": badge_row_contents,
+    })
 
     if rows:
         body_contents.append({"type": "separator", "margin": "lg"})
