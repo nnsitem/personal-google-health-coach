@@ -333,6 +333,10 @@ HELP_TEXTS = {
         "• \"Create a workout plan for ...\"\n"
         "• Daily summary every morning, weekly report on Sunday\n"
         "• Tell me your goals or preferred language and I'll remember\n\n"
+        "🎯 Nutrition targets\n"
+        "• \"Set target 1800 kcal, 150g protein, 2500ml water\"\n"
+        "• \"Change my calorie goal to 2200\"\n"
+        "• Current defaults: 2000 kcal, 120g protein, 65g fat, 250g carbs, 2000ml water\n\n"
         "📖 help — show this menu"
     ),
     "th": (
@@ -355,6 +359,10 @@ HELP_TEXTS = {
         "• \"สร้างแผนออกกำลังกายให้หน่อย ...\"\n"
         "• สรุปประจำวันทุกเช้า และรายงานประจำสัปดาห์วันอาทิตย์\n"
         "• บอกเป้าหมายหรือภาษาที่อยากให้ใช้ได้เลย เดี๋ยวผมจำไว้\n\n"
+        "🎯 ตั้งเป้าโภชนาการ\n"
+        "• \"ตั้งเป้า 1800 kcal, 150g โปรตีน, 2500ml น้ำ\"\n"
+        "• \"เปลี่ยนเป้าแคลอรี่เป็น 2200\"\n"
+        "• ค่าเริ่มต้น: 2000 kcal, 120g โปรตีน, 65g ไขมัน, 250g คาร์บ, 2000ml น้ำ\n\n"
         "📖 help — แสดงเมนูนี้"
     ),
 }

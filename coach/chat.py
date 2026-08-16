@@ -49,6 +49,11 @@ Keep replies to 3-5 sentences for casual chat, more only when asked for detail.
 
 Special abilities (use these directives on their own line at the END of your reply):
 - To save a fact/preference: [MEMORY: key = value]
+- To set or update daily nutrition/hydration targets when the user asks (e.g. "ตั้งเป้า 1800 kcal",
+  "set my protein target to 150g", "change water goal to 2500ml"):
+  [SET_NUTRITION_TARGETS: {"kcal": 1800, "protein_g": 150, "fat_g": 65, "carbs_g": 250, "water_ml": 2500}]
+  Include ALL 5 values — use the user's stated numbers for what they mentioned, keep current values
+  for the rest. Confirm what was changed in your visible reply.
 - To create a workout plan when the user asks for one: [CREATE_PLAN: brief description of what they want]
   After emitting this, tell the user you're putting together their plan and will share it.
 - To delete a food or drink log when the user asks (e.g. "delete that", "remove my last meal",
@@ -628,6 +633,14 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
                 # non-chat modules (food replies, etc.) see it too.
                 if key.lower() == "language" and value:
                     db.update_user(user_id, language=value)
+        elif stripped.startswith("[SET_NUTRITION_TARGETS:") and stripped.endswith("]"):
+            try:
+                targets_json = stripped[22:-1].strip()
+                targets = json.loads(targets_json)
+                save_goal(user_id, "daily_nutrition_targets", targets)
+                log.info("saved nutrition targets: %s", targets)
+            except (json.JSONDecodeError, ValueError) as e:
+                log.warning("failed to parse nutrition targets: %s", e)
         elif stripped.startswith("[CREATE_PLAN:") and stripped.endswith("]"):
             plan_request = stripped[13:-1].strip()
             log.info("plan creation requested: %s", plan_request)
