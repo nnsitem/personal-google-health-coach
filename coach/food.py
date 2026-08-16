@@ -34,12 +34,12 @@ If it's FOOD, use this shape:
   "food_name_en": "short food/meal name in ENGLISH",
   "food_name_local": "the same name in the user's language",
   "confidence": "high | medium | low",
+  "coaching_suggestion": "REQUIRED, never omit or leave empty — see rules below",
   "calories_kcal": number,
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
-  "notes": "one short sentence on assumptions (portion size, ingredients)",
-  "coaching_suggestion": "one short, specific coaching tip (see rules below)"
+  "notes": "one short sentence on assumptions (portion size, ingredients)"
 }
 
 If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
@@ -48,6 +48,7 @@ If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
   "drink_name_en": "short drink name in ENGLISH (e.g. 'water bottle', 'iced coffee')",
   "drink_name_local": "the same name in the user's language",
   "confidence": "high | medium | low",
+  "coaching_suggestion": "REQUIRED, never omit or leave empty — see rules below",
   "container_count": number,
   "volume_ml": number,
   "is_water": true or false,
@@ -55,8 +56,7 @@ If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
-  "notes": "one short sentence on assumptions (how many containers, size each)",
-  "coaching_suggestion": "one short, specific coaching tip (see rules below)"
+  "notes": "one short sentence on assumptions (how many containers, size each)"
 }
 
 DRINK volume rules (important — read carefully):
@@ -76,7 +76,8 @@ DRINK volume rules (important — read carefully):
 Estimate realistic values for what's shown. If there is no drink container at all
 in the photo, set "type" to "unknown".
 
-"coaching_suggestion" rules:
+"coaching_suggestion" rules — this field is REQUIRED in every response, food or
+drink, and must never be an empty string:
 - You'll be given the user's totals already logged today (before this item) and
   their daily targets. Use those REAL numbers, plus this item's own estimated
   nutrition, to decide what's most useful to say next.
@@ -327,7 +328,7 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
         # Shorter budget than scheduled jobs — a person is waiting in chat.
         text = gemini.generate(
             api_key, contents=[prompt, image_part],
-            max_output_tokens=1024, max_wait=60,
+            max_output_tokens=1536, max_wait=60,
         )
     except gemini.GeminiUnavailable:
         # Capacity outage, not a vision failure — let the caller tell the user
@@ -338,6 +339,8 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
         return None
     data = _extract_json(text)
     if data and data.get("type") in ("food", "drink"):
+        if not data.get("coaching_suggestion"):
+            log.warning("vision response missing coaching_suggestion (type=%s)", data.get("type"))
         return data
     return None
 
