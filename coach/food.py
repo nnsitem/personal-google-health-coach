@@ -110,6 +110,67 @@ def _explicit_meal_type(analysis: dict) -> str | None:
     return mt if mt in _MEAL_TYPES else None
 
 
+# Localized meal-slot labels for the log card tag line.
+_MEAL_LABEL = {
+    "en": {"BREAKFAST": "☀️ Breakfast", "LUNCH": "🍱 Lunch",
+            "DINNER": "🌙 Dinner", "SNACK": "🍿 Snack"},
+    "th": {"BREAKFAST": "☀️ มื้อเช้า", "LUNCH": "🍱 มื้อเที่ยง",
+            "DINNER": "🌙 มื้อเย็น", "SNACK": "🍿 ของว่าง"},
+}
+
+
+def _meal_and_time_labels(analysis: dict, lang: str) -> tuple[str | None, str | None]:
+    """Extract a displayable meal-slot label and time label from the analysis."""
+    meal_type = _explicit_meal_type(analysis)
+    meal_label = _MEAL_LABEL.get(lang, _MEAL_LABEL["en"]).get(meal_type) if meal_type else None
+    time_str = str(analysis.get("time") or "").strip()
+    time_label = f"⏰ {time_str}" if re.fullmatch(r"\d{1,2}:\d{2}", time_str) else None
+    return meal_label, time_label
+
+
+def _today_nutrition_totals(user_id: str) -> dict:
+    """Sum today's food logs (kcal, protein) and drink logs (ml) from local DB.
+
+    Returns {"kcal": int, "protein_g": int, "water_ml": int}.
+    """
+    tz = db.user_tz(db.get_user(user_id))
+    today_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff_utc = today_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    totals = {"kcal": 0, "protein_g": 0, "water_ml": 0}
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT content FROM insights WHERE user_id = ? AND kind = 'food_log' AND ts >= ?",
+            (user_id, cutoff_utc),
+        ).fetchall()
+    for row in rows:
+        try:
+            c = json.loads(row["content"])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        totals["kcal"] += round(_num(c.get("calories_kcal")))
+        totals["protein_g"] += round(_num(c.get("protein_g")))
+        if c.get("type") == "drink":
+            totals["water_ml"] += round(_num(c.get("volume_ml")))
+    return totals
+
+
+def _daily_total_label(user_id: str, lang: str) -> str | None:
+    """Build a '📊 วันนี้: 1,240 kcal · 45g protein · 1,200 ml' summary line."""
+    t = _today_nutrition_totals(user_id)
+    if t["kcal"] <= 0 and t["water_ml"] <= 0:
+        return None
+    parts = []
+    if t["kcal"] > 0:
+        parts.append(f"{t['kcal']:,} kcal")
+    if t["protein_g"] > 0:
+        parts.append(f"{t['protein_g']}g {'protein' if lang == 'en' else 'โปรตีน'}")
+    if t["water_ml"] > 0:
+        parts.append(f"{t['water_ml']:,} ml {'water' if lang == 'en' else 'น้ำ'}")
+    prefix = "📊 Today" if lang == "en" else "📊 วันนี้"
+    return f"{prefix}: {' · '.join(parts)}"
+
+
 def _num(x) -> float:
     """Lenient numeric coercion for model-produced values ('450', 450, None)."""
     try:
@@ -427,10 +488,14 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         if fat > 0:
             rows.append((labels["fat"], f"{fat} g"))
 
+        lang = _lang_code(_get_language(user_id))
+        meal_label, time_label = _meal_and_time_labels(analysis, lang)
+        daily_total = _daily_total_label(user_id, lang)
         bubble = build_log_bubble(
             name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
             highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
+            meal_label=meal_label, time_label=time_label, daily_total=daily_total,
         )
         return FlexReply(f"💧 {name}", bubble), rowid
 
@@ -454,10 +519,14 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         (labels["carbs"], f"{carbs} g"),
         (labels["fat"], f"{fat} g"),
     ]
+    lang = _lang_code(_get_language(user_id))
+    meal_label, time_label = _meal_and_time_labels(analysis, lang)
+    daily_total = _daily_total_label(user_id, lang)
     bubble = build_log_bubble(
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
         highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
         synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
+        meal_label=meal_label, time_label=time_label, daily_total=daily_total,
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -950,6 +1019,9 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         sync_label=labels["synced"] if synced else labels["not_synced"],
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
+        meal_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[0],
+        time_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[1],
+        daily_total=_daily_total_label(user_id, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
@@ -1015,6 +1087,9 @@ def _handle_drink(user_id: str, analysis: dict, labels: dict,
         sync_label=sync_label,
         low_conf_label=labels["low_conf"] if confidence == "low" else None,
         image_url=image_url,
+        meal_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[0],
+        time_label=_meal_and_time_labels(analysis, _lang_code(_get_language(user_id)))[1],
+        daily_total=_daily_total_label(user_id, _lang_code(_get_language(user_id))),
     )
     return FlexReply(f"💧 {name}", bubble), rowid
 

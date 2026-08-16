@@ -471,16 +471,19 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      highlight: tuple[str, str], rows: list[tuple[str, str]],
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
-                     image_url: str | None = None) -> dict:
+                     image_url: str | None = None,
+                     meal_label: str | None = None,
+                     time_label: str | None = None,
+                     daily_total: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, a small uppercase kicker
     ("NUTRITION LOG" / "HYDRATION LOG") in the type's accent color, the
-    logged item's name as a bold title, a colored highlight badge for the
-    single most important stat (kcal for food, volume for drinks), the rest
-    of the macros as receipt-style itemized rows, an optional muted notes
-    line, and a footer STATUS row (green when saved to Google Health, red
-    when analysis succeeded but the write failed).
+    logged item's name as a bold title, optional meal slot + time tags,
+    a colored highlight badge for the single most important stat (kcal for
+    food, volume for drinks), the rest of the macros as receipt-style itemized
+    rows, an optional muted notes line, and a footer with STATUS row + optional
+    daily running total.
     """
     highlight_icon, highlight_value = highlight
 
@@ -488,7 +491,19 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         _kicker(kicker, accent_color),
         {"type": "text", "text": name, "weight": "bold", "size": "xl",
          "wrap": True, "color": TEXT_DARK, "margin": "xs"},
-        {
+    ]
+
+    # Optional meal slot + time tags (muted, below the title)
+    tags = []
+    if meal_label:
+        tags.append(meal_label)
+    if time_label:
+        tags.append(time_label)
+    if tags:
+        body_contents.append({"type": "text", "text": " · ".join(tags), "size": "xs",
+                              "color": TEXT_MUTED, "margin": "xs", "wrap": False})
+
+    body_contents.append({
             "type": "box",
             "layout": "horizontal",
             "margin": "md",
@@ -508,8 +523,7 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                     ],
                 },
             ],
-        },
-    ]
+        })
 
     if rows:
         body_contents.append({"type": "separator", "margin": "lg"})
@@ -552,6 +566,10 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
     if low_conf_label:
         footer_contents.append({"type": "text", "text": low_conf_label, "size": "xs",
                                 "color": TEXT_MUTED, "wrap": True, "margin": "xs"})
+    if daily_total:
+        footer_contents.append({"type": "separator", "margin": "sm"})
+        footer_contents.append({"type": "text", "text": daily_total, "size": "xs",
+                                "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
 
     bubble = {
         "type": "bubble",
