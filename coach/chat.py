@@ -75,15 +75,18 @@ Special abilities (use these directives on their own line at the END of your rep
   [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
   Rules for these two directives:
   - coaching_suggestion is REQUIRED, never omit or leave empty. This is the ONLY
-    place the user sees a stat callout + coaching tip for this log (your visible
-    reply is not shown when the log succeeds — see below), so format it as ONE
-    line combining both: "<emoji> <stat label>「<value> <unit>」<short coaching
-    sentence>", e.g. "⭐ พลังงาน「0 kcal」ช่วยเติมความสดชื่นและรักษาสมดุลน้ำในร่างกาย
-    ได้อย่างดีครับ" or "💡 โปรตีน「22 g」เหลืออีก 40g วันนี้ ลองเติมไข่ต้มหรืออกไก่มื้อถัดไปนะครับ".
-    Pick whichever single stat (energy, or the nutrient furthest behind target)
-    is most useful to call out — use the "Today's nutrition so far vs daily
-    target" context plus this item's own nutrition. If targets are basically
-    met, lead with 🎉 and congratulate instead of naming a gap.
+    place the user sees this info (your visible reply is not shown when the log
+    succeeds — see below), so format it as ONE natural sentence, ALWAYS starting
+    with ✨ (this exact emoji, never ⭐/💡/🎉/💧 or any other): "✨ <item name>
+    <stat label>「<value> <unit>」<descriptive coaching sentence>", e.g.
+    "✨ น้ำเปล่า พลังงาน「0 kcal」ช่วยเติมความสดชื่นและรักษาสมดุลน้ำในร่างกายได้อย่างดีครับ"
+    or "✨ ข้าวผัด โปรตีน「22 g」เหลืออีก 40g วันนี้ ลองเติมไข่ต้มหรืออกไก่มื้อถัดไปนะครับ".
+    Write a real, specific, encouraging sentence — NEVER a bare number with no
+    context like "เหลืออีก 195ml"; always say why it matters or what to do next,
+    the way the examples do. Pick whichever single stat (energy, or the
+    nutrient furthest behind target) is most useful to name — use the "Today's
+    nutrition so far vs daily target" context plus this item's own nutrition.
+    If targets are basically met, congratulate instead of naming a gap.
   - food_name_en / food_name_local / drink_name_en / drink_name_local: write CLEAN,
     PROPERLY FORMATTED display names — not the user's raw shorthand. Capitalize brand
     names, use correct spelling, include quantity in parentheses. Examples:

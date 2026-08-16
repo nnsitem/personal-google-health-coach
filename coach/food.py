@@ -81,15 +81,20 @@ drink, and must never be an empty string:
 - You'll be given the user's totals already logged today (before this item) and
   their daily targets. Use those REAL numbers, plus this item's own estimated
   nutrition, to decide what's most useful to say next.
-- Format it as ONE line combining a stat callout with the tip: "<emoji> <stat
-  label>「<value> <unit>」<short coaching sentence>", e.g. "⭐ พลังงาน「0 kcal」
-  ช่วยเติมความสดชื่นและรักษาสมดุลน้ำในร่างกายได้อย่างดีครับ" or "💡 โปรตีน「22 g」
-  เหลืออีก 40g วันนี้ ลองเติมไข่ต้มหรืออกไก่มื้อถัดไปนะครับ". Pick whichever single
-  stat (energy, or the nutrient furthest behind target) is most useful to name.
-- Be specific and grounded in the numbers, not generic filler like "eat healthy."
+- This text appears on a card that doesn't otherwise show which item was just
+  logged, so name the item. Format it as ONE natural sentence, ALWAYS starting
+  with ✨ (this exact emoji, never ⭐/💡/🎉/💧 or any other): "✨ <item name>
+  <stat label>「<value> <unit>」<descriptive coaching sentence>", e.g.
+  "✨ น้ำเปล่า พลังงาน「0 kcal」ช่วยเติมความสดชื่นและรักษาสมดุลน้ำในร่างกายได้อย่างดีครับ"
+  or "✨ ข้าวผัด โปรตีน「22 g」เหลืออีก 40g วันนี้ ลองเติมไข่ต้มหรืออกไก่มื้อถัดไปนะครับ".
+  Pick whichever single stat (energy, or the nutrient furthest behind target)
+  is most useful to name.
+- Write a real, specific, encouraging sentence — NEVER a bare number with no
+  context like "เหลืออีก 195ml"; always say why it matters or what to do next,
+  the way the examples do. Not generic filler like "eat healthy" either.
 - If a nutrient is clearly behind target, suggest one concrete food/drink for
-  later today. If all targets are basically met, lead with 🎉 and congratulate
-  instead of naming a gap.
+  later today. If all targets are basically met, congratulate instead of
+  naming a gap.
 """
 
 
