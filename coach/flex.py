@@ -583,6 +583,51 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
     return bubble
 
 
+def _progress_suggestion(current: dict, targets: dict, lang: str) -> str:
+    """Generate a short contextual suggestion based on what's most deficient."""
+    # Calculate deficiency percentages
+    deficits = []
+    for key, label_th, label_en in [
+        ("protein_g", "โปรตีน", "protein"),
+        ("kcal", "พลังงาน", "calories"),
+        ("water_ml", "น้ำ", "water"),
+        ("carbs_g", "คาร์บ", "carbs"),
+        ("fat_g", "ไขมัน", "fat"),
+    ]:
+        tgt = targets.get(key, 0)
+        cur = current.get(key, 0)
+        if tgt > 0 and cur < tgt:
+            deficits.append((key, (tgt - cur) / tgt, label_th if lang == "th" else label_en))
+
+    if not deficits:
+        # All goals met!
+        return "🎉 ครบทุกเป้าแล้ววันนี้!" if lang == "th" else "🎉 All goals met today!"
+
+    # Pick the most deficient nutrient
+    deficits.sort(key=lambda x: x[1], reverse=True)
+    worst_key, worst_pct, worst_label = deficits[0]
+
+    # Suggestions by nutrient type
+    if lang == "th":
+        suggestions = {
+            "protein_g": "💡 เพิ่มโปรตีนได้ด้วย: ไข่ต้ม, อกไก่, กรีกโยเกิร์ต, ถั่วเหลือง",
+            "kcal": "💡 มื้อต่อไป: ข้าว+กับข้าว หรือขนมปังโฮลวีตแซนด์วิช",
+            "water_ml": "💧 อย่าลืมดื่มน้ำ! ตั้งเป้าอีก 1-2 แก้วก่อนนอน",
+            "carbs_g": "💡 เติมคาร์บได้จาก: ข้าวกล้อง, มันเทศ, กล้วย",
+            "fat_g": "💡 ไขมันดีจาก: อะโวคาโด, ถั่ว, น้ำมันมะกอก",
+        }
+    else:
+        suggestions = {
+            "protein_g": "💡 Boost protein: eggs, chicken breast, Greek yogurt, tofu",
+            "kcal": "💡 Next meal: rice bowl, whole-grain sandwich, or smoothie",
+            "water_ml": "💧 Don't forget to hydrate! Aim for 1-2 more glasses",
+            "carbs_g": "💡 Add carbs from: brown rice, sweet potato, banana",
+            "fat_g": "💡 Healthy fats: avocado, nuts, olive oil",
+        }
+
+    return suggestions.get(worst_key, "")
+
+
 def build_daily_progress_bubble(*, current: dict, targets: dict,
                                 lang: str = "en") -> dict | None:
     """A daily nutrition progress card showing current vs target with progress bars.
@@ -618,10 +663,9 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
         bar_color = "#7DCCAD" if cur >= tgt else "#FFC349"
         goal_met = cur >= tgt
         remaining = max(0, tgt - cur)
-        pct_int = min(100, round(pct * 100))
 
-        # Progress row: label + percentage on the right
-        pct_display = f"🎉 {pct_int}%" if goal_met else f"{pct_int}%"
+        # Progress row: label + value on the right (🎉 when goal met)
+        goal_icon = " 🎉" if goal_met else ""
         if unit == "kcal":
             value_text = f"{cur:,}/{tgt:,}"
         elif unit == "ml":
@@ -631,11 +675,11 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
 
         rows.append({"type": "box", "layout": "vertical", "spacing": "xs",
                      "margin": "md" if rows else "sm", "contents": [
-            # Label row: emoji+name on left, value + pct on right
+            # Label row: emoji+name on left, value on right
             {"type": "box", "layout": "horizontal", "contents": [
                 {"type": "text", "text": f"{emoji} {label}", "size": "xs",
                  "color": TEXT_MUTED, "flex": 1},
-                {"type": "text", "text": f"{value_text} {unit} ({pct_display})", "size": "xs",
+                {"type": "text", "text": f"{value_text} {unit}{goal_icon}", "size": "xs",
                  "color": TEXT_DARK, "weight": "bold", "align": "end", "flex": 0},
             ]},
             # Progress bar
@@ -675,6 +719,13 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
         contents.append({"type": "separator", "margin": "md"})
         contents.append({"type": "text", "text": footer_text, "size": "xxs",
                          "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
+
+    # Contextual suggestion based on what's most deficient
+    suggestion = _progress_suggestion(current, targets, lang)
+    if suggestion:
+        contents.append({"type": "separator", "margin": "md"})
+        contents.append({"type": "text", "text": suggestion, "size": "xs",
+                         "color": "#555555", "wrap": True, "margin": "sm"})
 
     return {
         "type": "bubble",
