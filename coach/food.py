@@ -81,14 +81,15 @@ drink, and must never be an empty string:
 - You'll be given the user's totals already logged today (before this item) and
   their daily targets. Use those REAL numbers, plus this item's own estimated
   nutrition, to decide what's most useful to say next.
-- Be specific and grounded in the numbers (e.g. name the nutrient furthest behind
-  target and roughly how much is left), not generic filler like "eat healthy."
+- Format it as ONE line combining a stat callout with the tip: "<emoji> <stat
+  label>「<value> <unit>」<short coaching sentence>", e.g. "⭐ พลังงาน「0 kcal」
+  ช่วยเติมความสดชื่นและรักษาสมดุลน้ำในร่างกายได้อย่างดีครับ" or "💡 โปรตีน「22 g」
+  เหลืออีก 40g วันนี้ ลองเติมไข่ต้มหรืออกไก่มื้อถัดไปนะครับ". Pick whichever single
+  stat (energy, or the nutrient furthest behind target) is most useful to name.
+- Be specific and grounded in the numbers, not generic filler like "eat healthy."
 - If a nutrient is clearly behind target, suggest one concrete food/drink for
-  later today. If all targets are basically met, give brief encouragement instead.
-- One short sentence, natural and conversational, starting with a single relevant
-  emoji (💡 for a tip, 🎉 if all targets are met, 💧 if it's about water).
-- Skip restating numbers already visible on the card (calories/macros of this
-  item) — focus on the gap or the win.
+  later today. If all targets are basically met, lead with 🎉 and congratulate
+  instead of naming a gap.
 """
 
 

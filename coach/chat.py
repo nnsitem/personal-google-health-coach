@@ -74,15 +74,16 @@ Special abilities (use these directives on their own line at the END of your rep
   [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
   [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
   Rules for these two directives:
-  - coaching_suggestion is REQUIRED, never omit or leave empty. Use the "Today's
-    nutrition so far vs daily target" context (current + this item's own
-    nutrition) to say what's actually useful next: name the nutrient furthest
-    behind target with a concrete food/drink idea, or briefly congratulate if
-    targets are basically met. One short sentence in the user's language,
-    starting with a single relevant emoji (💡 tip, 🎉 goals met, 💧 water-specific).
-    Don't restate numbers already in this directive's own fields — focus on the
-    gap or the win. This text is shown on the log card, separate from your
-    visible reply, so don't duplicate it there.
+  - coaching_suggestion is REQUIRED, never omit or leave empty. This is the ONLY
+    place the user sees a stat callout + coaching tip for this log (your visible
+    reply is not shown when the log succeeds — see below), so format it as ONE
+    line combining both: "<emoji> <stat label>「<value> <unit>」<short coaching
+    sentence>", e.g. "⭐ พลังงาน「0 kcal」ช่วยเติมความสดชื่นและรักษาสมดุลน้ำในร่างกาย
+    ได้อย่างดีครับ" or "💡 โปรตีน「22 g」เหลืออีก 40g วันนี้ ลองเติมไข่ต้มหรืออกไก่มื้อถัดไปนะครับ".
+    Pick whichever single stat (energy, or the nutrient furthest behind target)
+    is most useful to call out — use the "Today's nutrition so far vs daily
+    target" context plus this item's own nutrition. If targets are basically
+    met, lead with 🎉 and congratulate instead of naming a gap.
   - food_name_en / food_name_local / drink_name_en / drink_name_local: write CLEAN,
     PROPERLY FORMATTED display names — not the user's raw shorthand. Capitalize brand
     names, use correct spelling, include quantity in parentheses. Examples:
@@ -101,8 +102,10 @@ Special abilities (use these directives on their own line at the END of your rep
   - Emit one directive per item if they describe several distinct meals/drinks with
     different times; combine dishes eaten together into ONE entry.
   - Only log when the user asks to log/record something — not when food is merely mentioned.
-  - In your visible reply, confirm the item with the estimated calories (or volume) and
-    the meal slot if given. Do NOT say it was saved — the system appends the real save status.
+  - Keep your visible reply to a short one-line acknowledgment (e.g. "กำลังบันทึกให้ครับ").
+    When the log succeeds, this reply is NOT sent — the log card (item, stat, and
+    coaching_suggestion) already tells the whole story, so don't spend effort writing
+    a detailed confirmation here. It's only shown if the save fails.
 - To change the QUANTITY of the most recent food/drink log when the user says how much they
   actually had (e.g. "กินไปแล้ว 4 รอบ" right after a log, "I had 4 of those", "only drank half"):
   [ADJUST_LAST: {"kind": "drink", "times": 4}]
@@ -557,6 +560,12 @@ def handle_message(user_id: str, user_text: str,
         elif status:
             reply = reply + "\n\n" + status
 
+    # A successful log's card already shows the item, its stat, and a coaching
+    # tip — the AI's own acknowledgment text on top of that is just noise, so
+    # drop it (unless the reply also covers something else, e.g. a plan).
+    if extra_flex and not plan_request:
+        reply = ""
+
     # If the coach requested a deletion: a quote-reply deletes exactly the
     # quoted log; otherwise the newest log of that kind.
     if delete_kind:
@@ -582,6 +591,8 @@ def handle_message(user_id: str, user_text: str,
         except Exception:
             log.exception("failed to delete today's logs")
             reply = reply + "\n\n⚠️"
+
+    reply = reply.strip()
 
     # Store coach reply
     _save_chat_message(user_id, "coach", reply)
