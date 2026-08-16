@@ -471,8 +471,7 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      highlight: tuple[str, str], rows: list[tuple[str, str]],
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
-                     image_url: str | None = None,
-                     suggestion: str | None = None) -> dict:
+                     image_url: str | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, the logged item's name as a
@@ -546,14 +545,6 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
             "wrap": True, "margin": "lg",
         })
 
-    # Suggestion (for manual text logs — fills the empty space)
-    if suggestion:
-        body_contents.append({"type": "separator", "margin": "lg"})
-        body_contents.append({
-            "type": "text", "text": suggestion, "size": "xs", "color": "#555555",
-            "wrap": True, "margin": "md",
-        })
-
     footer_contents = []
     # Only show footer when there's a problem (sync failed or low confidence)
     if not synced:
@@ -581,65 +572,11 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
     if image_url:
         bubble["hero"] = {"type": "image", "url": image_url, "size": "full",
                           "aspectRatio": "20:13", "aspectMode": "cover"}
-    else:
-        # Colored accent strip at top for text-based logs (no photo)
-        bubble["header"] = {
-            "type": "box", "layout": "vertical",
-            "backgroundColor": accent_color,
-            "height": "6px", "paddingAll": "0px",
-            "contents": [{"type": "filler"}],
-        }
     return bubble
 
 
-def _progress_suggestion(current: dict, targets: dict, lang: str) -> str:
-    """Generate a short contextual suggestion based on what's most deficient."""
-    # Calculate deficiency percentages
-    deficits = []
-    for key, label_th, label_en in [
-        ("protein_g", "โปรตีน", "protein"),
-        ("kcal", "พลังงาน", "calories"),
-        ("water_ml", "น้ำ", "water"),
-        ("carbs_g", "คาร์บ", "carbs"),
-        ("fat_g", "ไขมัน", "fat"),
-    ]:
-        tgt = targets.get(key, 0)
-        cur = current.get(key, 0)
-        if tgt > 0 and cur < tgt:
-            deficits.append((key, (tgt - cur) / tgt, label_th if lang == "th" else label_en))
-
-    if not deficits:
-        # All goals met!
-        return "🎉 ครบทุกเป้าแล้ววันนี้!" if lang == "th" else "🎉 All goals met today!"
-
-    # Pick the most deficient nutrient
-    deficits.sort(key=lambda x: x[1], reverse=True)
-    worst_key, worst_pct, worst_label = deficits[0]
-
-    # Suggestions by nutrient type
-    if lang == "th":
-        suggestions = {
-            "protein_g": "💡 เพิ่มโปรตีนได้ด้วย: ไข่ต้ม, อกไก่, กรีกโยเกิร์ต, ถั่วเหลือง",
-            "kcal": "💡 มื้อต่อไป: ข้าว+กับข้าว หรือขนมปังโฮลวีตแซนด์วิช",
-            "water_ml": "💧 อย่าลืมดื่มน้ำ! ตั้งเป้าอีก 1-2 แก้วก่อนนอน",
-            "carbs_g": "💡 เติมคาร์บได้จาก: ข้าวกล้อง, มันเทศ, กล้วย",
-            "fat_g": "💡 ไขมันดีจาก: อะโวคาโด, ถั่ว, น้ำมันมะกอก",
-        }
-    else:
-        suggestions = {
-            "protein_g": "💡 Boost protein: eggs, chicken breast, Greek yogurt, tofu",
-            "kcal": "💡 Next meal: rice bowl, whole-grain sandwich, or smoothie",
-            "water_ml": "💧 Don't forget to hydrate! Aim for 1-2 more glasses",
-            "carbs_g": "💡 Add carbs from: brown rice, sweet potato, banana",
-            "fat_g": "💡 Healthy fats: avocado, nuts, olive oil",
-        }
-
-    return suggestions.get(worst_key, "")
-
-
 def build_daily_progress_bubble(*, current: dict, targets: dict,
-                                lang: str = "en",
-                                show_suggestion: bool = True) -> dict | None:
+                                lang: str = "en") -> dict | None:
     """A daily nutrition progress card showing current vs target with progress bars.
 
     `current`: {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}
@@ -729,13 +666,6 @@ def build_daily_progress_bubble(*, current: dict, targets: dict,
         contents.append({"type": "separator", "margin": "md"})
         contents.append({"type": "text", "text": footer_text, "size": "xxs",
                          "color": TEXT_MUTED, "wrap": True, "margin": "sm"})
-
-    # Contextual suggestion based on what's most deficient
-    suggestion = _progress_suggestion(current, targets, lang) if show_suggestion else ""
-    if suggestion:
-        contents.append({"type": "separator", "margin": "md"})
-        contents.append({"type": "text", "text": suggestion, "size": "xs",
-                         "color": "#555555", "wrap": True, "margin": "sm"})
 
     return {
         "type": "bubble",

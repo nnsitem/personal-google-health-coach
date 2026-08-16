@@ -544,15 +544,10 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
             rows.append((labels["fat"], f"{fat} g"))
 
         lang = _lang_code(_get_language(user_id))
-        # For text logs, put suggestion on the log card (fills empty space)
-        from coach.flex import _progress_suggestion
-        _suggestion = _progress_suggestion(
-            _today_nutrition_totals(user_id), _get_daily_targets(user_id), lang)
         bubble = build_log_bubble(
             name=name, kicker=labels["kicker_drink"], accent_color=COLOR_DRINK,
             highlight=("🥤", f"{ml} ml"), rows=rows, notes=analysis.get("notes"),
             synced=synced_hydration or synced_nutrition, sync_label=sync_label,
-            suggestion=_suggestion,
         )
         return FlexReply(f"💧 {name}", bubble), rowid
 
@@ -576,16 +571,10 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
         (labels["carbs"], f"{carbs} g"),
         (labels["fat"], f"{fat} g"),
     ]
-    lang = _lang_code(_get_language(user_id))
-    # For text logs, put suggestion on the log card (fills empty space)
-    from coach.flex import _progress_suggestion
-    _suggestion = _progress_suggestion(
-        _today_nutrition_totals(user_id), _get_daily_targets(user_id), lang)
     bubble = build_log_bubble(
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
         highlight=("🔥", f"{cal} kcal"), rows=rows, notes=analysis.get("notes"),
         synced=synced, sync_label=labels["synced"] if synced else labels["not_synced"],
-        suggestion=_suggestion,
     )
     return FlexReply(f"🍽️ {name} — {cal} kcal", bubble), rowid
 
