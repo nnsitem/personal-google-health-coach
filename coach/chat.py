@@ -9,6 +9,7 @@ Run standalone test:  python -m coach.chat "How did I sleep last night?"
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 
 from coach import db
@@ -629,9 +630,20 @@ def _format_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
+_DIRECTIVE_RE = re.compile(
+    r"\[(MEMORY|SET_NUTRITION_TARGETS|CREATE_PLAN|DELETE_LAST|DELETE_TODAY|LOG_FOOD|LOG_DRINK|ADJUST_LAST):\s*(.*?)\]",
+    re.DOTALL,
+)
+
+
 def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None, list]:
     """Extract [MEMORY: ...], [CREATE_PLAN: ...], [DELETE_LAST: ...] and
     [LOG_FOOD/LOG_DRINK: {...}] directives.
+
+    Matches directives anywhere in the text (not just on an isolated line),
+    since the model doesn't always put the tag alone on its own line — it may
+    trail extra acknowledgment text right after the closing "]" on the same
+    line, which a strict per-line match would miss entirely.
 
     Returns (cleaned_text, plan_request_or_None, delete_kind_or_None, logs,
     delete_today_or_None) where logs is a list of ("food"|"drink"|"adjust",
@@ -640,8 +652,6 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
     dropping it. Memory directives are saved immediately; the rest are
     returned for the caller to handle (slower operations).
     """
-    lines = text.split("\n")
-    clean_lines = []
     plan_request = None
     delete_kind = None
     delete_today = None
@@ -657,10 +667,11 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             log.warning("unparseable %s directive: %s", kind, inner[:200])
             logs.append((kind, None))
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("[MEMORY:") and stripped.endswith("]"):
-            inner = stripped[8:-1].strip()
+    def _handle(m: re.Match) -> str:
+        nonlocal plan_request, delete_kind, delete_today
+        tag = m.group(1)
+        inner = m.group(2).strip()
+        if tag == "MEMORY":
             if "=" in inner:
                 key, value = inner.split("=", 1)
                 key, value = key.strip(), value.strip()
@@ -670,29 +681,28 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
                 # non-chat modules (food replies, etc.) see it too.
                 if key.lower() == "language" and value:
                     db.update_user(user_id, language=value)
-        elif stripped.startswith("[SET_NUTRITION_TARGETS:") and stripped.endswith("]"):
+        elif tag == "SET_NUTRITION_TARGETS":
             try:
-                targets_json = stripped[22:-1].strip()
-                targets = json.loads(targets_json)
+                targets = json.loads(inner)
                 save_goal(user_id, "daily_nutrition_targets", targets)
                 log.info("saved nutrition targets: %s", targets)
             except (json.JSONDecodeError, ValueError) as e:
                 log.warning("failed to parse nutrition targets: %s", e)
-        elif stripped.startswith("[CREATE_PLAN:") and stripped.endswith("]"):
-            plan_request = stripped[13:-1].strip()
+        elif tag == "CREATE_PLAN":
+            plan_request = inner
             log.info("plan creation requested: %s", plan_request)
-        elif stripped.startswith("[DELETE_LAST:") and stripped.endswith("]"):
-            kind = stripped[13:-1].strip().lower()
+        elif tag == "DELETE_LAST":
+            kind = inner.lower()
             delete_kind = "drink" if "drink" in kind else "food"
             log.info("delete requested: %s", delete_kind)
-        elif stripped.startswith("[LOG_FOOD:") and stripped.endswith("]"):
-            _parse_log("food", stripped[10:-1].strip())
-        elif stripped.startswith("[LOG_DRINK:") and stripped.endswith("]"):
-            _parse_log("drink", stripped[11:-1].strip())
-        elif stripped.startswith("[ADJUST_LAST:") and stripped.endswith("]"):
-            _parse_log("adjust", stripped[13:-1].strip())
-        elif stripped.startswith("[DELETE_TODAY:") and stripped.endswith("]"):
-            val = stripped[14:-1].strip().lower()
+        elif tag == "LOG_FOOD":
+            _parse_log("food", inner)
+        elif tag == "LOG_DRINK":
+            _parse_log("drink", inner)
+        elif tag == "ADJUST_LAST":
+            _parse_log("adjust", inner)
+        elif tag == "DELETE_TODAY":
+            val = inner.lower()
             if "drink" in val or "hydration" in val or "water" in val:
                 delete_today = "drink"
             elif "food" in val or "meal" in val or "nutrition" in val:
@@ -700,10 +710,10 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             else:
                 delete_today = "all"
             log.info("delete-today requested: %s", delete_today)
-        else:
-            clean_lines.append(line)
+        return ""
 
-    return "\n".join(clean_lines).strip(), plan_request, delete_kind, logs, delete_today
+    cleaned = _DIRECTIVE_RE.sub(_handle, text)
+    return cleaned.strip(), plan_request, delete_kind, logs, delete_today
 
 
 if __name__ == "__main__":
