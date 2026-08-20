@@ -140,6 +140,14 @@ def _safe_image_cleanup() -> None:
         log.exception("temp image cleanup failed")
 
 
+def _safe_db_prune() -> None:
+    """Drop rows past their retention window (sync_log, old nudges, chat tail)."""
+    try:
+        db.prune_old_rows()
+    except Exception:
+        log.exception("db prune failed")
+
+
 # --- Lifespan ---------------------------------------------------------------
 
 @asynccontextmanager
@@ -168,6 +176,9 @@ async def lifespan(app: FastAPI):
     )
     scheduler.add_job(_safe_image_cleanup, "cron", minute=50, id="image_cleanup",
                       misfire_grace_time=3000, coalesce=True)
+    # Daily at 04:20 server time — off-peak, and no user job runs then.
+    scheduler.add_job(_safe_db_prune, "cron", hour=4, minute=20, id="db_prune",
+                      misfire_grace_time=3600, coalesce=True)
     scheduler.start()
     log.info(
         "scheduler started (sync at :05, nudges at :35, daily dispatch at :%02d "

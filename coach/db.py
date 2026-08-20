@@ -700,6 +700,66 @@ def clear_failures(user_id: str, kind: str) -> None:
         )
 
 
+# --- Retention ---------------------------------------------------------------
+
+# sync_log is pure diagnostics and by far the fastest-growing table: one row per
+# data type per sync, hourly, per user (~500/day at 4 users) — it passed 14k rows
+# while every other table was under 1k. Two weeks is plenty to debug a sync
+# problem after the fact.
+SYNC_LOG_RETENTION_DAYS = 14
+# Nudge insights are a delivery record, kept only long enough for the
+# same-type cooldown (6h) and any post-hoc "why did it say that" check.
+NUDGE_RETENTION_DAYS = 90
+# Chat history per user; only the last 10 turns are ever read back (DESIGN-V2 §12.2).
+CHAT_HISTORY_KEEP_PER_USER = 500
+
+
+def prune_old_rows() -> dict[str, int]:
+    """Delete rows no longer needed. Returns {table: rows_deleted}.
+
+    Deliberately conservative about `insights`: 'food_log' rows are the
+    nutrition history that weekly reports read and that delete/adjust resolve
+    against, and 'daily_summary'/'weekly_report' rows carry the dedup flag
+    insight_sent_today() checks — none of those are pruned here, only 'nudge'.
+
+    Safe with respect to `log_messages`, which references insights by rowid:
+    SQLite only reuses a rowid when the LARGEST one is freed, and this deletes
+    the oldest rows, so a surviving mapping can never come to point at a
+    different log. Orphaned mappings are swept anyway.
+    """
+    deleted: dict[str, int] = {}
+    with connect() as conn:
+        deleted["sync_log"] = conn.execute(
+            "DELETE FROM sync_log WHERE ts < datetime('now', ?)",
+            (f"-{SYNC_LOG_RETENTION_DAYS} day",),
+        ).rowcount
+        deleted["insights_nudge"] = conn.execute(
+            "DELETE FROM insights WHERE kind = 'nudge' AND ts < datetime('now', ?)",
+            (f"-{NUDGE_RETENTION_DAYS} day",),
+        ).rowcount
+        # Keep the newest N per user; ts ties are broken by rowid so the cut is
+        # deterministic.
+        deleted["chat_messages"] = conn.execute(
+            """
+            DELETE FROM chat_messages WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid,
+                           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts DESC, rowid DESC) AS rn
+                    FROM chat_messages
+                ) WHERE rn > ?
+            )
+            """,
+            (CHAT_HISTORY_KEEP_PER_USER,),
+        ).rowcount
+        deleted["log_messages"] = conn.execute(
+            "DELETE FROM log_messages WHERE insight_rowid NOT IN (SELECT rowid FROM insights)"
+        ).rowcount
+    total = sum(deleted.values())
+    if total:
+        log.info("pruned %d old rows: %s", total, {k: v for k, v in deleted.items() if v})
+    return deleted
+
+
 def log_sync(user_id: str, data_type: str, ok: bool, detail: str = "") -> None:
     with connect() as conn:
         conn.execute(
