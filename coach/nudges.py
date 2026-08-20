@@ -48,6 +48,27 @@ Guidelines:
 # Rules — each returns a dict {"type": str, "condition": str} or None
 # ---------------------------------------------------------------------------
 
+LOW_STEPS_THRESHOLD = 3000
+# Below this, 3,000 steps isn't a shortfall for this person, so the nudge would
+# be nagging them about a normal day.
+LOW_STEPS_MIN_BASELINE = 4000
+
+
+def _avg_steps(user_id: str, days: int = 30) -> float | None:
+    """The user's own mean daily steps over the trailing `days`, or None."""
+    with db.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT AVG(CAST(json_extract(value_json, '$.steps.countSum') AS REAL)) AS avg_steps
+            FROM metrics
+            WHERE user_id = ? AND data_type = 'steps' AND day >= date('now', ?)
+              AND json_extract(value_json, '$.steps.countSum') IS NOT NULL
+            """,
+            (user_id, f"-{days} day"),
+        ).fetchone()
+    return row["avg_steps"] if row and row["avg_steps"] else None
+
+
 def _rule_low_steps(user_id: str, now: datetime) -> dict | None:
     """Fire if it's afternoon (14:00+) and today's steps are below 3000."""
     if now.hour < 14:
@@ -70,13 +91,26 @@ def _rule_low_steps(user_id: str, now: datetime) -> dict | None:
         return None
 
     steps = int(steps)
-    if steps < 3000:
-        return {
-            "type": "low_steps",
-            "condition": f"It's {now.strftime('%H:%M')} and you've only logged {steps:,} steps today. "
-                         f"You usually average over 6,000.",
-        }
-    return None
+    if steps >= LOW_STEPS_THRESHOLD:
+        return None
+
+    # Quote the user's REAL baseline. This used to assert a hard-coded "you
+    # usually average over 6,000" — wrong for everyone whose average isn't
+    # that, and the coach stating a made-up number about the user's own
+    # history undermines every other number it reports.
+    baseline = _avg_steps(user_id)
+    if baseline is None:
+        comparison = "You have no step history yet to compare against."
+    elif baseline < LOW_STEPS_MIN_BASELINE:
+        return None  # 3,000 is normal for them — nothing to nudge about
+    else:
+        comparison = f"You average {round(baseline):,} steps a day over the past month."
+
+    return {
+        "type": "low_steps",
+        "condition": f"It's {now.strftime('%H:%M')} and you've only logged {steps:,} steps today. "
+                     f"{comparison}",
+    }
 
 
 def _rule_step_streak(user_id: str, now: datetime) -> dict | None:
@@ -151,9 +185,33 @@ def _rule_high_resting_hr(user_id: str, now: datetime) -> dict | None:
     return None
 
 
+def _night_hour(local_dt: datetime) -> float:
+    """Bedtime on a continuous evening scale: 22:30 → 22.5, 01:30 → 25.5.
+
+    Falling asleep after midnight still belongs to the previous evening, so
+    hours before noon are shifted past 24. Without this a plain average of raw
+    clock hours puts a 23:30-and-00:30 sleeper at 12:00 (midday).
+    """
+    h = local_dt.hour + local_dt.minute / 60
+    return h + 24 if h < 12 else h
+
+
+def _fmt_night_hour(value: float) -> str:
+    """Night-scale hour back to a clock label: 25.5 → '01:30'."""
+    hours = int(value) % 24
+    return f"{hours:02d}:{int(round((value % 1) * 60)) % 60:02d}"
+
+
 def _rule_bedtime_reminder(user_id: str, now: datetime) -> dict | None:
-    """Fire at 21:00-21:30 if user's average bedtime is around 22:00."""
-    if not (21 <= now.hour <= 21 and now.minute < 30):
+    """Fire during the 21:00 hour if the user typically falls asleep 21:00–03:00.
+
+    The window is the whole hour, not 21:00–21:30: the nudge check is scheduled
+    at :35 past the hour (coach.main), so a `minute < 30` condition could never
+    be true and this rule never fired once in production. Hour 21 is the last
+    slot available anyway — quiet hours begin at 22:00 — and NUDGE_COOLDOWN_HOURS
+    already prevents a repeat, so matching on the hour alone is sufficient.
+    """
+    if now.hour != 21:
         return None
 
     # Check recent sleep start times
@@ -173,7 +231,7 @@ def _rule_bedtime_reminder(user_id: str, now: datetime) -> dict | None:
         try:
             start = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
             local_start = start.astimezone(now.tzinfo)
-            bed_hours.append(local_start.hour + local_start.minute / 60)
+            bed_hours.append(_night_hour(local_start))
         except (ValueError, TypeError):
             continue
 
@@ -181,15 +239,20 @@ def _rule_bedtime_reminder(user_id: str, now: datetime) -> dict | None:
         return None
 
     avg_bed = sum(bed_hours) / len(bed_hours)
-    # Only nudge if they typically sleep between 21:30 and 23:30
-    if 21.5 <= avg_bed <= 23.5:
-        return {
-            "type": "bedtime_reminder",
-            "condition": f"Based on your sleep data, you usually fall asleep around "
-                         f"{int(avg_bed)}:{int((avg_bed % 1) * 60):02d}. "
-                         f"Time to start winding down for quality sleep.",
-        }
-    return None
+    # Only nudge people whose typical bedtime is 21:00–03:00 on the night scale.
+    # The window used to be 21.5–23.5 against the RAW local hour, so anyone
+    # falling asleep after midnight averaged ~1.6 and was silently excluded —
+    # i.e. the rule skipped exactly the late sleepers a wind-down reminder is
+    # for. (This user averages 01:38; they could never have received it.)
+    if not (21.0 <= avg_bed <= 27.0):
+        return None
+
+    return {
+        "type": "bedtime_reminder",
+        "condition": f"Based on your sleep data, you usually fall asleep around "
+                     f"{_fmt_night_hour(avg_bed)}. It's {now.strftime('%H:%M')} now. "
+                     f"Time to start winding down for quality sleep.",
+    }
 
 
 # All rules to evaluate
