@@ -71,7 +71,10 @@ Special abilities (use these directives on their own line at the END of your rep
   ยืนยันไหมครับ?"), and emit the directive only after they confirm in their next message.
   The system appends the result of the deletion.
 - To log food or drinks the user describes in words (e.g. "log: grilled pork 3 skewers with sticky rice",
-  "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว"):
+  "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว",
+  "เพิ่มมื้อเช้า ไข่ต้ม 1 ฟอง", "เพิ่มน้ำ 330 ml", "จดข้าวผัด 1 จาน", "กินไข่ต้ม 2 ฟอง",
+  "add lunch: chicken salad" — "เพิ่ม" / "ลง" / "บันทึก" / "จด" / "add" + a food or drink
+  is ALWAYS a log request, whether or not a meal name follows):
   [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
   [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
   Rules for these two directives:
@@ -106,6 +109,14 @@ Special abilities (use these directives on their own line at the END of your rep
   - Emit one directive per item if they describe several distinct meals/drinks with
     different times; combine dishes eaten together into ONE entry.
   - Only log when the user asks to log/record something — not when food is merely mentioned.
+  - CRITICAL — you never save anything yourself; emitting the directive is the ONLY thing
+    that saves. If a reply of yours contains no directive, NOTHING was written to Google
+    Health. So never write "บันทึกแล้ว" / "logged it" / "saved" and never quote a NEW
+    running total unless this same reply carries the matching directive. If you are unsure
+    whether the user wants it logged, ASK instead of claiming you saved it.
+  - In the conversation history above, your own past turns that read "[LOG_FOOD] …" /
+    "[LOG_DRINK] …" / "[ADJUST_LAST] …" are the turns where a save actually happened —
+    that tag is how it happened, and it is what you must emit again here.
   - Keep your visible reply to a short one-line acknowledgment (e.g. "กำลังบันทึกให้ครับ").
     When the log succeeds, this reply is NOT sent — the log card (item, stat, and
     coaching_suggestion) already tells the whole story, so don't spend effort writing
@@ -398,6 +409,163 @@ def _build_context_message(user_id: str) -> str:
     return "\n\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Missed-directive safety net
+#
+# The conversational model is not reliable about appending a [LOG_FOOD] /
+# [LOG_DRINK] directive: observed live, "เพิ่มมื้อเที่ยง ไข่ต้ม 1 ฟอง" came
+# back as a fluent "บันทึกไข่ต้มเรียบร้อยแล้ว … รวม 1,605 kcal" with no
+# directive at all, so nothing reached Google Health while the user was told
+# it had. The same sentence logged fine 100 minutes later — it is a
+# prompt-adherence coin flip, not a parsing bug.
+#
+# So logging does not stay a side effect of the chat turn: when the message
+# plainly asks to record something and the chat reply carried no log
+# directive, one small single-purpose call re-reads the message and returns
+# just the payload. It costs a call only on the turns the primary path missed.
+# ---------------------------------------------------------------------------
+
+# Verbs that explicitly say "record this" — these win over the revision
+# wording below, because "บันทึกน้ำครึ่งแก้ว" is a new entry even though it
+# contains ครึ่ง (half).
+_RECORD_VERB_RE = re.compile(
+    r"เพิ่ม|บันทึก|จด|ลงมื้อ|ลงอาหาร|ลงน้ำ|ลงโภชนา|"
+    r"\blog\b|\badd\b|\brecord\b",
+    re.IGNORECASE,
+)
+# Merely eating/drinking. Enough on its own ("กินไข่ต้ม 2 ฟอง"), but yields to
+# revision wording since "I had 4 of those" is about an existing entry.
+_CONSUME_VERB_RE = re.compile(
+    r"กิน|ทาน|ดื่ม|\bate\b|\bdrank\b|\bhad\b|\bdrink\b|\beat\b",
+    re.IGNORECASE,
+)
+
+# A question about food ("วันนี้กินไปกี่แคล", "how many calories did I have?")
+# trips the verbs above without asking for anything to be logged.
+_QUESTION_RE = re.compile(
+    r"[?？]|ไหม|มั้ย|หรือเปล่า|กี่|เท่าไห?ร่|อะไร|ยังไง|เป็นไง|"
+    r"\bhow\b|\bwhat\b|\bwhy\b|\bwhen\b|\bshould\b|\bdid i\b",
+    re.IGNORECASE,
+)
+
+
+# Phrasing that revises an entry that already exists ("กินไปแล้ว 4 รอบ", "only
+# half", "make that 750ml"). These share verbs with the log intents above, so
+# without this the extractor would answer a missed ADJUST_LAST by creating a
+# second, phantom entry instead of rescaling the first.
+# แก้(?!ว) because แก้ว ("glass") merely contains แก้ ("to change") — without
+# the guard, "บันทึกน้ำ 1 แก้ว" reads as a revision and never gets logged.
+_ADJUST_INTENT_RE = re.compile(
+    r"รอบ|เท่า|ครึ่ง|แก้(?!ว)|เปลี่ยน|ปรับ|อันนี้|"
+    r"\bactually\b|\bmake (?:that|it)\b|\binstead\b|\bhalf\b|\bof those\b|\bchange\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_log_request(text: str, is_quote_reply: bool = False) -> bool:
+    """Cheap gate for the extractor below: does this message ask for a NEW
+    entry to be recorded?
+
+    False for questions, for revisions of an existing entry, and for
+    quote-replies (which by definition point at one) — the extractor creates
+    entries, so a wrong yes here would duplicate rather than rescale.
+    """
+    if is_quote_reply or _QUESTION_RE.search(text):
+        return False
+    if _RECORD_VERB_RE.search(text):
+        return True
+    return bool(_CONSUME_VERB_RE.search(text)) and not _ADJUST_INTENT_RE.search(text)
+
+
+_LOG_EXTRACTOR_PROMPT = """\
+You extract food/drink logging requests. You do NOT chat, coach, or explain.
+
+Given one user message, output ONLY a JSON object, no markdown, no prose:
+{"items": [ ... ]}
+
+Each item is one meal or one drink the user is asking to record:
+food:  {"kind": "food", "food_name_en": "...", "food_name_local": "...",
+        "coaching_suggestion": "...", "calories_kcal": 0, "protein_g": 0,
+        "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}
+drink: {"kind": "drink", "drink_name_en": "...", "drink_name_local": "...",
+        "coaching_suggestion": "...", "container_count": 1, "volume_ml": 0,
+        "is_water": true, "calories_kcal": 0, "protein_g": 0,
+        "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}
+
+Return {"items": []} — and nothing else — when the message is NOT asking to
+record an item: a question about past intake, a request to delete or change an
+existing entry, a comment about food, or ordinary conversation.
+
+Rules:
+- One item per distinct meal/drink; dishes eaten together are ONE item.
+- Estimate realistic nutrition from the description and stated portions
+  (a glass ≈ 250 ml, a bottle ≈ 500 ml). volume_ml is the TOTAL across containers.
+- Every number a plain number, never a range or text.
+- *_en names in English; *_local names and coaching_suggestion in the user's language.
+  Names are display titles: capitalize brands, correct the spelling, put the
+  quantity in parentheses — e.g. "ไข่ต้ม (1 ฟอง)" / "Boiled Egg (1 egg)".
+- meal_type is "BREAKFAST"|"LUNCH"|"DINNER"|"SNACK" ONLY when the user names the
+  meal (มื้อเช้า/มื้อเที่ยง/มื้อเย็น/ของว่าง); otherwise null.
+- time is "HH:MM" (24h local) ONLY when the user states a time; you may add
+  "date": "YYYY-MM-DD" for an earlier day. Otherwise null.
+- coaching_suggestion is REQUIRED: ONE natural sentence starting with ✨ (this
+  exact emoji), naming the item and one useful stat, e.g.
+  "✨ ไข่ต้ม โปรตีน「6 g」ช่วยเติมโปรตีนให้เข้าใกล้เป้าหมายวันนี้ครับ".
+  Ground it in the supplied today's-totals-vs-target numbers. Never a bare number.
+"""
+
+
+def _extract_log_fallback(user_id: str, user_text: str, api_key: str) -> list[tuple[str, dict]]:
+    """Re-read the message with a single-purpose extractor and return
+    [(kind, payload)] in the same shape _process_directives produces.
+
+    Returns [] when the message isn't a log request or the call fails — the
+    caller then behaves exactly as it did before this net existed.
+    """
+    language = db.get_user_language(user_id)
+    tz = db.user_tz(db.get_user(user_id))
+    prompt_parts = [f"User's language: {language}",
+                    f"Current local time: {datetime.now(tz).strftime('%Y-%m-%d %H:%M')}"]
+    try:
+        from coach.food import get_daily_progress
+        progress = get_daily_progress(user_id)
+        prompt_parts.append(
+            "Today's totals so far vs daily target: "
+            f"current={json.dumps(progress['current'], separators=(',', ':'))} "
+            f"target={json.dumps(progress['targets'], separators=(',', ':'))}"
+        )
+    except Exception:
+        log.warning("extractor: could not load daily progress", exc_info=True)
+    prompt_parts.append(f"User message:\n{user_text}")
+
+    try:
+        text = gemini.generate(
+            api_key, contents="\n\n".join(prompt_parts),
+            system_instruction=_LOG_EXTRACTOR_PROMPT,
+            max_output_tokens=1536, min_chars=2, max_wait=45,
+        )
+    except Exception:
+        log.warning("extractor call failed — leaving the turn unlogged", exc_info=True)
+        return []
+
+    from coach.food import _extract_json
+    data = _extract_json(text)
+    if not isinstance(data, dict):
+        log.warning("extractor returned unparseable output: %s", str(text)[:200])
+        return []
+
+    out: list[tuple[str, dict]] = []
+    for item in data.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").lower()
+        if kind not in ("food", "drink"):
+            # Infer from the payload when the model omits "kind".
+            kind = "drink" if (item.get("volume_ml") or item.get("drink_name_en")) else "food"
+        out.append((kind, {k: v for k, v in item.items() if k != "kind"}))
+    return out
+
+
 def handle_message(user_id: str, user_text: str,
                    quoted_message_id: str | None = None) -> tuple[str, list[int], list]:
     """Process an inbound user message and generate a coach reply.
@@ -441,7 +609,15 @@ def handle_message(user_id: str, user_text: str,
     conversation_parts = [f"[HEALTH DATA CONTEXT]\n{context}\n\n[CONVERSATION]"]
     for msg in history[:-1]:  # exclude the message we just stored (it's the current one)
         prefix = "User" if msg["role"] == "user" else "Coach"
-        conversation_parts.append(f"{prefix}: {msg['text']}")
+        # Turns stored before the log-marker fix (below) are blank whenever a
+        # log succeeded, because the Flex card carried the whole reply. Rendered
+        # verbatim they read as the coach answering a log request with silence,
+        # so name what actually happened instead.
+        text = msg["text"] or (
+            "[LOG_FOOD / LOG_DRINK] (logged — confirmation card sent)"
+            if msg["role"] != "user" else ""
+        )
+        conversation_parts.append(f"{prefix}: {text}")
     if quoted_log:
         try:  # stored with escaped unicode; re-dump so Thai names are readable
             quoted_json = json.dumps(json.loads(quoted_log["content"]),
@@ -492,6 +668,17 @@ def handle_message(user_id: str, user_text: str,
     # Extract and process directives (memory + plan creation + delete + logs)
     reply, plan_request, delete_kind, chat_logs, delete_today = _process_directives(user_id, reply)
 
+    # Safety net: the model regularly answers a log request with a fluent
+    # "saved it!" and no directive, which used to mean the entry never reached
+    # Google Health while the user was told it had. Re-read the message with
+    # the single-purpose extractor instead of losing the log. Skipped when a
+    # deletion/adjustment was requested — those aren't new entries.
+    if (not chat_logs and not delete_kind and not delete_today
+            and _looks_like_log_request(user_text, is_quote_reply=bool(quoted_message_id))):
+        chat_logs = _extract_log_fallback(user_id, user_text, api_key)
+        log.info("no log directive in reply for a log-shaped message — extractor produced %d entry(ies)",
+                 len(chat_logs))
+
     # If the coach requested a plan, create it and append a formatted summary
     if plan_request:
         try:
@@ -512,6 +699,8 @@ def handle_message(user_id: str, user_text: str,
     # success itself).
     created_rowids: list[int] = []
     extra_flex: list = []
+    # What actually got written, for the chat-history turn (see below).
+    history_marks: list[str] = []
     for kind, analysis in chat_logs:
         try:
             from coach.food import log_chat_entry, adjust_last_log
@@ -524,10 +713,18 @@ def handle_message(user_id: str, user_text: str,
                 # re-targets the same log.
                 if adj_rowid is not None:
                     created_rowids.append(adj_rowid)
+                    history_marks.append(
+                        f"[ADJUST_LAST] ×{(analysis or {}).get('times')}")
             else:
                 status, rowid = log_chat_entry(user_id, kind, analysis)
                 if rowid is not None:
                     created_rowids.append(rowid)
+                    tag = "LOG_DRINK" if kind == "drink" else "LOG_FOOD"
+                    from coach.flex import FlexReply as _FlexReply
+                    label = (status.alt_text if isinstance(status, _FlexReply)
+                             else (analysis or {}).get("food_name_local")
+                             or (analysis or {}).get("drink_name_local") or "")
+                    history_marks.append(f"[{tag}] {label}".strip())
         except Exception:
             # log_food_to_health/log_hydration_to_health already turn any
             # write failure (HealthAPIError or otherwise) into a clean
@@ -598,8 +795,17 @@ def handle_message(user_id: str, user_text: str,
 
     reply = reply.strip()
 
-    # Store coach reply
-    _save_chat_message(user_id, "coach", reply)
+    # Store coach reply. What lands here is fed back as few-shot context on
+    # every later turn, so it must record what the coach ACTUALLY did: a
+    # successful log stored an EMPTY turn (the Flex card carried the whole
+    # reply) while a MISSED log stored the model's fluent "บันทึกแล้ว" prose.
+    # Read back together, those taught the model that prose confirmations are
+    # how logging works — and it then stopped emitting the directive at all
+    # (observed live 2026-08-20: two "ไข่ต้ม 1 ฟอง" requests confirmed in
+    # prose, nothing written). Naming the executed directive keeps the
+    # history's implicit example the correct one.
+    history_reply = "\n".join(p for p in (reply, " ".join(history_marks)) if p)
+    _save_chat_message(user_id, "coach", history_reply)
 
     return reply, created_rowids, extra_flex
 
@@ -630,13 +836,79 @@ def _format_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
-_DIRECTIVE_RE = re.compile(
-    r"\[(MEMORY|SET_NUTRITION_TARGETS|CREATE_PLAN|DELETE_LAST|DELETE_TODAY|LOG_FOOD|LOG_DRINK|ADJUST_LAST):\s*(.*?)\]",
-    re.DOTALL,
+_DIRECTIVE_OPEN_RE = re.compile(
+    r"\[(MEMORY|SET_NUTRITION_TARGETS|CREATE_PLAN|DELETE_LAST|DELETE_TODAY|LOG_FOOD|LOG_DRINK|ADJUST_LAST):\s*"
 )
 
 
-def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None, list]:
+def _match_brace(text: str, start: int) -> int | None:
+    """Index just past the `}` closing the object that opens at `start`.
+
+    String-aware, so a brace or bracket inside a value doesn't confuse the
+    depth count. Returns None when the object never closes.
+    """
+    depth = 0
+    in_str = False
+    escaped = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _scan_directives(text: str):
+    """Yield (tag, payload, start, end) for each directive found in `text`.
+
+    A JSON payload is delimited by brace matching rather than by the next
+    "]" — a `]` inside a string value (a coaching_suggestion, a food name)
+    used to truncate the payload into unparseable JSON, and a missing closing
+    `]` made the regex skip the directive entirely, silently dropping the log
+    while leaving the raw tag in the user's reply.
+    """
+    pos = 0
+    while True:
+        m = _DIRECTIVE_OPEN_RE.search(text, pos)
+        if not m:
+            return
+        body_start = m.end()
+        if body_start < len(text) and text[body_start] == "{":
+            brace_end = _match_brace(text, body_start)
+            if brace_end is None:  # unterminated JSON — take the rest of the line
+                nl = text.find("\n", body_start)
+                brace_end = len(text) if nl < 0 else nl
+            payload = text[body_start:brace_end]
+            end = brace_end
+            # Swallow the closing "]" when the model remembered to write one.
+            rest = text[brace_end:]
+            skip = len(rest) - len(rest.lstrip(" \t"))
+            if rest[skip:skip + 1] == "]":
+                end = brace_end + skip + 1
+        else:
+            close = text.find("]", body_start)
+            if close < 0:
+                payload, end = text[body_start:], len(text)
+            else:
+                payload, end = text[body_start:close], close + 1
+        yield m.group(1), payload.strip(), m.start(), end
+        pos = end
+
+
+def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None, list, str | None]:
     """Extract [MEMORY: ...], [CREATE_PLAN: ...], [DELETE_LAST: ...] and
     [LOG_FOOD/LOG_DRINK: {...}] directives.
 
@@ -667,10 +939,8 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             log.warning("unparseable %s directive: %s", kind, inner[:200])
             logs.append((kind, None))
 
-    def _handle(m: re.Match) -> str:
+    def _handle(tag: str, inner: str) -> None:
         nonlocal plan_request, delete_kind, delete_today
-        tag = m.group(1)
-        inner = m.group(2).strip()
         if tag == "MEMORY":
             if "=" in inner:
                 key, value = inner.split("=", 1)
@@ -710,10 +980,15 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             else:
                 delete_today = "all"
             log.info("delete-today requested: %s", delete_today)
-        return ""
 
-    cleaned = _DIRECTIVE_RE.sub(_handle, text)
-    return cleaned.strip(), plan_request, delete_kind, logs, delete_today
+    kept: list[str] = []
+    cursor = 0
+    for tag, inner, start, end in _scan_directives(text):
+        kept.append(text[cursor:start])
+        cursor = end
+        _handle(tag, inner)
+    kept.append(text[cursor:])
+    return "".join(kept).strip(), plan_request, delete_kind, logs, delete_today
 
 
 if __name__ == "__main__":

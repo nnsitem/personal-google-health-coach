@@ -118,6 +118,32 @@ def _thinking_config(model: str):
         return None
 
 
+def _warn_if_truncated(model: str, response, max_output_tokens: int) -> None:
+    """Log when a response was cut off by the output cap.
+
+    A truncated reply still arrives as ordinary text, so callers can't tell.
+    That matters because coach.chat puts its [LOG_FOOD]/[MEMORY] directives at
+    the END of the reply — a response clipped mid-sentence loses them, and the
+    log silently never happens. Thinking tokens count against this same cap,
+    so the visible text can be short while the budget is spent.
+    """
+    try:
+        candidate = (response.candidates or [None])[0]
+        reason = str(getattr(candidate, "finish_reason", "") or "")
+        if "MAX_TOKENS" not in reason.upper():
+            return
+        usage = getattr(response, "usage_metadata", None)
+        log.warning(
+            "model %s hit the %d-token output cap (finish_reason=%s, thoughts=%s, "
+            "output=%s) — the reply is truncated and any trailing directive is lost",
+            model, max_output_tokens, reason,
+            getattr(usage, "thoughts_token_size", None) or getattr(usage, "thoughts_token_count", None),
+            getattr(usage, "candidates_token_count", None),
+        )
+    except Exception:  # diagnostics must never break generation
+        pass
+
+
 def generate(
     api_key: str,
     contents,
@@ -160,6 +186,7 @@ def generate(
                     model=model, contents=contents, config=_build_config(model)
                 )
                 text = response.text
+                _warn_if_truncated(model, response, max_output_tokens)
                 return text if (text and len(text.strip()) >= min_chars) else None
             except Exception as e:
                 msg = str(e).lower()
