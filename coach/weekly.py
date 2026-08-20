@@ -107,7 +107,7 @@ def build_weekly_snapshot(user_id: str) -> dict:
             except (ValueError, KeyError):
                 continue
 
-        total_min = sum(totals.values())
+        in_bed_min = sum(totals.values())
         start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(tz)
         end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(tz)
 
@@ -115,9 +115,16 @@ def build_weekly_snapshot(user_id: str) -> dict:
             "date": start_local.strftime("%Y-%m-%d"),
             "bedtime": start_local.strftime("%H:%M"),
             "wake": end_local.strftime("%H:%M"),
-            "total_hours": round(total_min / 60, 1),
+            # total_hours = time ASLEEP, awake time excluded. This used to sum
+            # every stage (i.e. time in BED), so the narrative quoted nights up
+            # to ~0.3h longer than both the daily brief and the "Sleep / night"
+            # average on the same card — which come from stats.py and exclude
+            # AWAKE, matching the figure the Google Health app shows.
+            "total_hours": round((in_bed_min - totals["AWAKE"]) / 60, 1),
+            "in_bed_hours": round(in_bed_min / 60, 1),
             "deep_min": round(totals["DEEP"]),
             "rem_min": round(totals["REM"]),
+            "awake_min": round(totals["AWAKE"]),
         })
 
     # Goals
