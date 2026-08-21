@@ -148,59 +148,64 @@ def _meal_label_for(analysis: dict, lang: str) -> str | None:
 
 
 def _today_nutrition_totals(user_id: str) -> dict:
-    """Get today's nutrition + hydration totals from Google Health (authoritative,
-    includes data from ALL apps). Falls back to local DB if the API call fails.
+    """Today's nutrition + hydration totals, counted from OUR OWN logged history.
+
+    Google Health used to be the source here, on the theory that it is
+    authoritative because it aggregates every app. In practice that makes the
+    number only as trustworthy as the worst writer on the device: a Health
+    Connect bridge that mirrors our own entries back in doubles every total,
+    and when it loops it does far worse — on 2026-08-21 it had re-imported the
+    day's meals 19,673 times and the card read 820,981 kcal against a 3,200
+    target. Those points cannot even be deleted (they belong to another
+    client), so the corruption is not something this app can clean up.
+
+    The insights history is exact for anything logged through the coach, costs
+    no API call, and cannot be inflated by another app. Google Health is
+    consulted only when we logged nothing at all today, so a meal recorded in
+    some other nutrition app still shows up rather than reading as zero — and
+    even then a total past a sane multiple of the user's target is rejected.
 
     Returns {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}.
     """
     tz = db.user_tz(db.get_user(user_id))
+    totals = _local_today_totals(user_id, tz)
+    if any(v > 0 for v in totals.values()):
+        return totals
+
     today = datetime.now(tz).date()
     tomorrow = today + timedelta(days=1)
-
-    totals = {"kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "water_ml": 0}
-
+    external = {"kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "water_ml": 0}
     try:
         client = client_for_user(user_id)
-
-        # Nutrition rollup for today
-        nutrition_points = client.daily_rollup(
-            "nutrition-log", today.isoformat(), tomorrow.isoformat())
-        for pt in nutrition_points:
+        for pt in client.daily_rollup("nutrition-log", today.isoformat(), tomorrow.isoformat()):
             nl = pt.get("nutritionLog", {})
-            totals["kcal"] += round(float(nl.get("energy", {}).get("kcalSum", 0)))
-            totals["carbs_g"] += round(float(nl.get("totalCarbohydrate", {}).get("gramsSum", 0)))
-            totals["fat_g"] += round(float(nl.get("totalFat", {}).get("gramsSum", 0)))
+            external["kcal"] += round(float(nl.get("energy", {}).get("kcalSum", 0)))
+            external["carbs_g"] += round(float(nl.get("totalCarbohydrate", {}).get("gramsSum", 0)))
+            external["fat_g"] += round(float(nl.get("totalFat", {}).get("gramsSum", 0)))
             for n in nl.get("nutrients", []):
                 if n.get("nutrient") == "PROTEIN":
-                    totals["protein_g"] += round(float(n.get("quantity", {}).get("gramsSum", 0)))
-
-        # Hydration rollup for today
-        hydration_points = client.daily_rollup(
-            "hydration-log", today.isoformat(), tomorrow.isoformat())
-        for pt in hydration_points:
+                    external["protein_g"] += round(float(n.get("quantity", {}).get("gramsSum", 0)))
+        for pt in client.daily_rollup("hydration-log", today.isoformat(), tomorrow.isoformat()):
             hl = pt.get("hydrationLog", {})
-            totals["water_ml"] += round(float(hl.get("amountConsumed", {}).get("millilitersSum", 0)))
-
+            external["water_ml"] += round(float(hl.get("amountConsumed", {}).get("millilitersSum", 0)))
     except Exception:
-        log.warning("Google Health rollup failed — falling back to local DB totals")
-        return _local_today_totals(user_id, tz)
+        log.warning("Google Health rollup failed while looking for externally "
+                    "logged food — reporting zero totals")
+        return totals
 
-    implausible = _implausible_totals(user_id, totals)
+    implausible = _implausible_totals(user_id, external)
     if implausible:
-        # Google Health aggregates every writer, so one app that mirrors our
-        # entries back in floods the rollup: on 2026-08-21 a Health Connect
-        # bridge (nl.appyhapps.healthsync) had re-imported the day's meals
-        # 19,673 times and the card showed 820,981 kcal against a 3,200 target.
-        # Our own insights history is the honest number in that state.
         targets = _get_daily_targets(user_id)
         log.warning(
-            "today's Google Health totals are implausible (%s) — using local DB "
-            "history instead. Another app is probably duplicating entries.",
-            ", ".join(f"{k}={totals[k]} vs target {targets.get(k)}" for k in implausible),
+            "ignoring implausible Google Health totals (%s) — another app is "
+            "duplicating entries; reporting our own history instead.",
+            ", ".join(f"{k}={external[k]} vs target {targets.get(k)}" for k in implausible),
         )
-        return _local_today_totals(user_id, tz)
+        return totals
 
-    return totals
+    if any(v > 0 for v in external.values()):
+        log.info("no coach-logged entries today — using Google Health totals (%s)", external)
+    return external
 
 
 # A rollup this far past the user's own target isn't a big eating day, it's
