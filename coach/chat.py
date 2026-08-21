@@ -62,14 +62,19 @@ Special abilities (use these directives on their own line at the END of your rep
   [DELETE_LAST: food] for a meal, or [DELETE_LAST: drink] for a drink.
   If the user is quote-replying to a specific logged entry (shown in the context), the system
   deletes EXACTLY that entry — use its type as the kind. Otherwise the newest log of that kind
-  is deleted. After emitting this, confirm which item you're removing.
+  is deleted. After emitting this, name the item you are removing — but do NOT claim it is
+  already gone; the system appends the real outcome, which can be a failure.
 - To delete ALL of today's logs when the user asks to clear the whole day (e.g.
   "ลบรายการอาหารวันนี้ทั้งหมด", "clear all my logs today", "delete today's hydration"):
   [DELETE_TODAY: all] — or [DELETE_TODAY: food] / [DELETE_TODAY: drink] for one kind only.
   This is DESTRUCTIVE and irreversible: do NOT emit it on the first request. First ask the
   user to confirm (mention what will be wiped, e.g. "จะลบรายการอาหารและเครื่องดื่มของวันนี้ทั้งหมด
   ยืนยันไหมครับ?"), and emit the directive only after they confirm in their next message.
-  The system appends the result of the deletion.
+  The system appends the real result of the deletion, which may be a FAILURE or a
+  partial success. So say only that you are carrying it out — never "ลบเรียบร้อยแล้ว" /
+  "deleted" / "ข้อมูลถูกรีเซ็ตแล้ว", and never state how many entries were removed. A
+  reply claiming success above a system line reporting failure is worse than saying
+  nothing: the user believes their data is gone when it is not.
 - To log food or drinks the user describes in words (e.g. "log: grilled pork 3 skewers with sticky rice",
   "ลงโภชนาการ หมูปิ้ง 3 ไม้ กับข้าวเหนียว 1 ห่อ", "log 2 glasses of water", "บันทึกน้ำ 1 แก้ว",
   "เพิ่มมื้อเช้า ไข่ต้ม 1 ฟอง", "เพิ่มน้ำ 330 ml", "จดข้าวผัด 1 จาน", "กินไข่ต้ม 2 ฟอง",
@@ -666,7 +671,7 @@ def handle_message(user_id: str, user_text: str,
         reply = "Sorry, I'm having trouble connecting right now. Try again in a moment! 🙏"
 
     # Extract and process directives (memory + plan creation + delete + logs)
-    reply, plan_request, delete_kind, chat_logs, delete_today = _process_directives(user_id, reply)
+    reply, plan_request, delete_kind, chat_logs, delete_today, directive_failures = _process_directives(user_id, reply)
 
     # Safety net: the model regularly answers a log request with a fluent
     # "saved it!" and no directive, which used to mean the entry never reached
@@ -793,6 +798,15 @@ def handle_message(user_id: str, user_text: str,
             log.exception("failed to delete today's logs")
             reply = reply + "\n\n⚠️"
 
+    # A directive the system could not carry out must not be left under a
+    # confident reply that says it worked.
+    if directive_failures:
+        from coach.food import LABELS, _lang_code
+        labels = LABELS.get(_lang_code(db.get_user_language(user_id)), LABELS["en"])
+        for failed in directive_failures:
+            if failed == "nutrition_targets":
+                reply = (reply + "\n\n" + labels["targets_failed"]).strip()
+
     reply = reply.strip()
 
     # Store coach reply. What lands here is fed back as few-shot context on
@@ -908,7 +922,7 @@ def _scan_directives(text: str):
         pos = end
 
 
-def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None, list, str | None]:
+def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str | None, list, str | None, list]:
     """Extract [MEMORY: ...], [CREATE_PLAN: ...], [DELETE_LAST: ...] and
     [LOG_FOOD/LOG_DRINK: {...}] directives.
 
@@ -928,6 +942,10 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
     delete_kind = None
     delete_today = None
     logs: list[tuple[str, dict | None]] = []
+    # Directives that were emitted but could not be carried out; the caller
+    # turns these into a visible correction so a confident reply is never left
+    # standing over work that silently failed.
+    failures: list[str] = []
 
     def _parse_log(kind: str, inner: str) -> None:
         try:
@@ -952,12 +970,18 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
                 if key.lower() == "language" and value:
                     db.update_user(user_id, language=value)
         elif tag == "SET_NUTRITION_TARGETS":
+            # A parse failure used to be logged and dropped, leaving the model's
+            # "your targets are updated" reply standing over nothing saved.
+            # Surface it so the caller can tell the user the truth.
             try:
                 targets = json.loads(inner)
+                if not isinstance(targets, dict) or not targets:
+                    raise ValueError("empty or non-object payload")
                 save_goal(user_id, "daily_nutrition_targets", targets)
                 log.info("saved nutrition targets: %s", targets)
             except (json.JSONDecodeError, ValueError) as e:
-                log.warning("failed to parse nutrition targets: %s", e)
+                log.warning("failed to parse nutrition targets (%s): %s", e, inner[:200])
+                failures.append("nutrition_targets")
         elif tag == "CREATE_PLAN":
             plan_request = inner
             log.info("plan creation requested: %s", plan_request)
@@ -988,7 +1012,7 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
         cursor = end
         _handle(tag, inner)
     kept.append(text[cursor:])
-    return "".join(kept).strip(), plan_request, delete_kind, logs, delete_today
+    return "".join(kept).strip(), plan_request, delete_kind, logs, delete_today, failures
 
 
 if __name__ == "__main__":
