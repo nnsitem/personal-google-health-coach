@@ -156,10 +156,11 @@ def _today_nutrition_totals(user_id: str) -> dict:
     (nl.appyhapps.healthsync) once re-imported this user's meals 19,673 times
     and the progress card read 820,981 kcal against a 3,200 target. Points from
     another client cannot even be deleted from here
-    (DATA_POINT_NOT_OWNED_BY_CLIENT), so two guards stand in front of the
-    number: a total past a sane multiple of the user's own target is rejected in
-    favour of our logged history, and a milder mismatch against that history is
-    logged for the owner to investigate.
+    (DATA_POINT_NOT_OWNED_BY_CLIENT), so our own logged history is used as a
+    check on it: a total past a sane multiple of the user's target is rejected
+    outright, a milder mismatch is logged for the owner to investigate, and each
+    metric finally takes the HIGHER of the two sources so an entry deleted or
+    lost outside the coach can't make the card under-report.
 
     Returns {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}.
     """
@@ -197,7 +198,20 @@ def _today_nutrition_totals(user_id: str) -> dict:
         return local
 
     _warn_if_double_counted(external, local)
-    return external
+
+    # Per metric, take whichever source is higher. Google Health holds our own
+    # writes PLUS anything logged in another app, so it should never read LOWER
+    # than our log — when it does, the entry was removed outside the coach (a
+    # Health Connect wipe deletes every app's data, ours included) or a write
+    # silently failed. Our own history is the part we know happened, so it acts
+    # as the floor rather than letting the card drop to zero for meals the user
+    # definitely logged.
+    merged = {k: max(external.get(k, 0), local.get(k, 0)) for k in local}
+    below = [k for k in local if local[k] > external.get(k, 0)]
+    if below:
+        log.info("Google Health reads lower than our own log for %s — using our "
+                 "figures as the floor", ", ".join(below))
+    return merged
 
 
 # Google Health should read at least as high as our own log (it contains ours
