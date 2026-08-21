@@ -174,7 +174,9 @@ def build_daily_snapshot(user_id: str) -> dict:
         if today_workout:
             snapshot["todays_workout"] = today_workout
     except Exception:
-        pass
+        # Bare `pass` here hid a broken plan lookup completely: the brief just
+        # stopped mentioning the workout and nothing said why.
+        log.warning("could not load today's workout for %s", user_id, exc_info=True)
 
     # Include multi-window trends (week/month averages + week-over-week) so the
     # brief can reference patterns, not just yesterday's numbers.
@@ -182,7 +184,10 @@ def build_daily_snapshot(user_id: str) -> dict:
         from coach.stats import build_trends
         snapshot["trends"] = build_trends(user_id)
     except Exception:
-        pass
+        # Without trends the brief silently drops the ❤️ Recovery section and
+        # every week/month comparison — too big a degradation to swallow.
+        log.warning("could not build trends for %s — the brief will have no "
+                    "recovery verdict or trend context", user_id, exc_info=True)
 
     return snapshot
 

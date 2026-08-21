@@ -93,6 +93,22 @@ def _resp_rate(v: dict):
     return None
 
 
+# Physiological sanity bounds. Google Health aggregates every app that writes
+# to it, so one misbehaving mirror app can inflate a daily total the way a
+# Health Connect bridge inflated nutrition ~19,000x on 2026-08-21. A value
+# outside these bounds is corrupt data, not a remarkable day, and letting it
+# through would put it in the daily brief and every trend average.
+_SANE_RANGE = {
+    "steps": (0, 100_000),
+    "total-calories": (0, 20_000),
+    "daily-resting-heart-rate": (20, 200),
+    "active-zone-minutes": (0, 1_440),
+    "daily-heart-rate-variability": (1, 500),
+    "daily-oxygen-saturation": (50, 100),
+    "daily-respiratory-rate": (3, 60),
+}
+
+
 _EXTRACTORS = {
     "steps": _steps,
     "total-calories": _calories,
@@ -125,8 +141,15 @@ def _load_daily_series(user_id: str, days: int) -> dict[str, dict[str, float]]:
             val = extractor(json.loads(row["value_json"]))
         except (ValueError, KeyError, TypeError):
             val = None
-        if val is not None:
-            series[dt][row["day"]] = val
+        if val is None:
+            continue
+        lo, hi = _SANE_RANGE.get(dt, (float("-inf"), float("inf")))
+        if not (lo <= val <= hi):
+            log.warning("dropping implausible %s value for %s: %r (expected %s..%s) "
+                        "— another app may be duplicating data into Google Health",
+                        dt, row["day"], val, lo, hi)
+            continue
+        series[dt][row["day"]] = val
     return series
 
 
