@@ -148,29 +148,23 @@ def _meal_label_for(analysis: dict, lang: str) -> str | None:
 
 
 def _today_nutrition_totals(user_id: str) -> dict:
-    """Today's nutrition + hydration totals, counted from OUR OWN logged history.
+    """Today's nutrition + hydration totals from Google Health, which aggregates
+    every app that writes there — so food logged outside the coach still counts.
 
-    Google Health used to be the source here, on the theory that it is
-    authoritative because it aggregates every app. In practice that makes the
-    number only as trustworthy as the worst writer on the device: a Health
-    Connect bridge that mirrors our own entries back in doubles every total,
-    and when it loops it does far worse — on 2026-08-21 it had re-imported the
-    day's meals 19,673 times and the card read 820,981 kcal against a 3,200
-    target. Those points cannot even be deleted (they belong to another
-    client), so the corruption is not something this app can clean up.
-
-    The insights history is exact for anything logged through the coach, costs
-    no API call, and cannot be inflated by another app. Google Health is
-    consulted only when we logged nothing at all today, so a meal recorded in
-    some other nutrition app still shows up rather than reading as zero — and
-    even then a total past a sane multiple of the user's target is rejected.
+    That breadth is also the risk: the totals are only as trustworthy as the
+    worst writer on the device. A Health Connect bridge
+    (nl.appyhapps.healthsync) once re-imported this user's meals 19,673 times
+    and the progress card read 820,981 kcal against a 3,200 target. Points from
+    another client cannot even be deleted from here
+    (DATA_POINT_NOT_OWNED_BY_CLIENT), so two guards stand in front of the
+    number: a total past a sane multiple of the user's own target is rejected in
+    favour of our logged history, and a milder mismatch against that history is
+    logged for the owner to investigate.
 
     Returns {"kcal": int, "protein_g": int, "fat_g": int, "carbs_g": int, "water_ml": int}.
     """
     tz = db.user_tz(db.get_user(user_id))
-    totals = _local_today_totals(user_id, tz)
-    if any(v > 0 for v in totals.values()):
-        return totals
+    local = _local_today_totals(user_id, tz)
 
     today = datetime.now(tz).date()
     tomorrow = today + timedelta(days=1)
@@ -189,9 +183,8 @@ def _today_nutrition_totals(user_id: str) -> dict:
             hl = pt.get("hydrationLog", {})
             external["water_ml"] += round(float(hl.get("amountConsumed", {}).get("millilitersSum", 0)))
     except Exception:
-        log.warning("Google Health rollup failed while looking for externally "
-                    "logged food — reporting zero totals")
-        return totals
+        log.warning("Google Health rollup failed — falling back to our own logged history")
+        return local
 
     implausible = _implausible_totals(user_id, external)
     if implausible:
@@ -201,11 +194,36 @@ def _today_nutrition_totals(user_id: str) -> dict:
             "duplicating entries; reporting our own history instead.",
             ", ".join(f"{k}={external[k]} vs target {targets.get(k)}" for k in implausible),
         )
-        return totals
+        return local
 
-    if any(v > 0 for v in external.values()):
-        log.info("no coach-logged entries today — using Google Health totals (%s)", external)
+    _warn_if_double_counted(external, local)
     return external
+
+
+# Google Health should read at least as high as our own log (it contains ours
+# plus anything logged elsewhere), but not a multiple of it. Past this ratio a
+# mirror app is the likelier explanation than a big meal logged in another app.
+_DUPLICATION_RATIO = 1.8
+
+
+def _warn_if_double_counted(external: dict, local: dict) -> None:
+    """Flag the case the implausibility guard is too coarse to catch.
+
+    A bridge app that mirrors our entries 1:1 merely DOUBLES each total, which
+    stays far below the 10x-of-target guard yet still misreports the day. This
+    only logs — the user may genuinely have logged food in another app, so it
+    must not silently change the number — but it leaves a trail naming the
+    suspicion instead of quietly reporting inflated totals.
+    """
+    for key in ("kcal", "water_ml"):
+        ours, theirs = local.get(key, 0), external.get(key, 0)
+        if ours > 0 and theirs >= ours * _DUPLICATION_RATIO:
+            log.warning(
+                "Google Health reports %s=%s but the coach logged only %s today "
+                "(%.1fx) — either food was logged in another app, or an app is "
+                "duplicating our entries back into Google Health.",
+                key, theirs, ours, theirs / ours,
+            )
 
 
 # A rollup this far past the user's own target isn't a big eating day, it's
