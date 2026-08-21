@@ -612,6 +612,14 @@ async def line_webhook(request: Request, background_tasks: BackgroundTasks):
         if not user_id:
             continue
 
+        # Exactly-once per LINE message id. The isRedelivery check above only
+        # catches retries LINE flags as such; an unflagged duplicate delivery
+        # used to be processed again, logging the same meal twice (observed
+        # 2026-08-19: one request, two logs 3s apart, two Google Health points).
+        if not db.claim_message(msg.get("id", ""), user_id):
+            log.info("skipping already-processed message %s", msg.get("id"))
+            continue
+
         # V2: auto-create user on first contact and send the welcome. Their
         # first message is still processed below (so "login" as an opener
         # works) — but the welcome takes the reply token, the follow-up

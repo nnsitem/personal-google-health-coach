@@ -107,6 +107,12 @@ CREATE TABLE IF NOT EXISTS log_messages (
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS processed_events (
+    message_id TEXT PRIMARY KEY,        -- LINE message id, claimed exactly once
+    user_id    TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS failure_state (
     user_id     TEXT NOT NULL,
     kind        TEXT NOT NULL,              -- 'google_auth' | 'sync' | 'daily_summary'
@@ -520,7 +526,7 @@ def get_user_language(user_id: str) -> str:
         if row and row["content"]:
             return row["content"].strip()
     except Exception:
-        pass
+        log.warning("could not read language preference for %s", user_id, exc_info=True)
     user = get_user(user_id)
     if user and user.get("language"):
         return user["language"]
@@ -751,6 +757,10 @@ def prune_old_rows() -> dict[str, int]:
             """,
             (CHAT_HISTORY_KEEP_PER_USER,),
         ).rowcount
+        # Webhook dedup keys only matter for as long as LINE might retry.
+        deleted["processed_events"] = conn.execute(
+            "DELETE FROM processed_events WHERE created_at < datetime('now', '-7 day')"
+        ).rowcount
         deleted["log_messages"] = conn.execute(
             "DELETE FROM log_messages WHERE insight_rowid NOT IN (SELECT rowid FROM insights)"
         ).rowcount
@@ -758,6 +768,32 @@ def prune_old_rows() -> dict[str, int]:
     if total:
         log.info("pruned %d old rows: %s", total, {k: v for k, v in deleted.items() if v})
     return deleted
+
+
+def claim_message(message_id: str, user_id: str) -> bool:
+    """Claim a LINE message id for processing. False = already handled.
+
+    LINE can deliver the same event more than once, and only some retries carry
+    the isRedelivery flag — which is how one "Whey Protein" request became two
+    logs 3 seconds apart (and two Google Health points) on 2026-08-19. The
+    PRIMARY KEY makes the claim atomic, so a duplicate delivery loses the race
+    and is dropped instead of double-logging the meal.
+
+    Fails OPEN: if the bookkeeping itself breaks, the message is processed
+    rather than silently swallowed.
+    """
+    if not message_id:
+        return True
+    try:
+        with connect() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO processed_events (message_id, user_id) VALUES (?, ?)",
+                (message_id, user_id),
+            )
+        return cur.rowcount > 0
+    except Exception:
+        log.exception("could not claim message %s — processing anyway", message_id)
+        return True
 
 
 def log_sync(user_id: str, data_type: str, ok: bool, detail: str = "") -> None:
