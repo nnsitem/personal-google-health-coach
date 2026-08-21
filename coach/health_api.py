@@ -4,7 +4,7 @@ The API launched in 2026. Endpoint shapes below follow the published docs at
 https://developers.google.com/health/reference/rest/v4/
 
 Data type names are kebab-case in URL paths (e.g., active-zone-minutes).
-`dailyRollUp` and `reconcile` are POST methods with a JSON request body.
+`dailyRollUp` is a POST method with a JSON request body.
 `list` is a GET with query parameters including a filter string.
 """
 
@@ -18,6 +18,22 @@ from coach.auth import get_credentials
 from coach.config import GOOGLE_HEALTH_BASE
 
 log = logging.getLogger(__name__)
+
+
+# dataPoints:batchDelete accepts at most 10000 names per request (documented).
+# Kept well under it so one rejected chunk costs little and the request stays small.
+DELETE_CHUNK_SIZE = 500
+
+# Hard stop for paginated reads. Any legitimate window fits well inside this;
+# hitting it means the server is not converging, and an unbounded `while True`
+# would otherwise spin forever inside a request handler.
+MAX_PAGES = 60
+
+# `list` allows pageSize up to 10000 (default 1440) — EXCEPT sleep and exercise,
+# which are capped at 25. Asking for more is silently clamped today, but sending
+# an out-of-spec value invites a 400 the day the API tightens.
+LIST_PAGE_SIZE = 1000
+LIST_PAGE_SIZE_BY_TYPE = {"sleep": 25, "exercise": 25}
 
 
 class HealthAPIError(RuntimeError):
@@ -68,7 +84,10 @@ class HealthClient:
         """The current credentials as a JSON string (post-refresh if one happened)."""
         return self._creds.to_json()
 
-    def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, params: dict | None = None,
+                 json_body: dict | None = None, retry_5xx: bool = True) -> dict:
+        """retry_5xx=False for non-idempotent calls (writes): a 5xx may mean
+        "applied, then failed to answer", and resending would duplicate it."""
         url = f"{GOOGLE_HEALTH_BASE}/{path.lstrip('/')}"
         for attempt in range(4):
             resp = self._session.request(
@@ -79,7 +98,12 @@ class HealthClient:
                 headers={"Authorization": f"Bearer {self._creds.token}"},
                 timeout=30,
             )
-            if resp.status_code in (429, 500, 502, 503):
+            # 429 means the request was REJECTED, so resending it is always
+            # safe. A 5xx is ambiguous — the server may have applied the change
+            # before failing to answer — so it is only retried for calls whose
+            # repetition can't create anything (see retry_5xx).
+            retryable = resp.status_code == 429 or (retry_5xx and resp.status_code in (500, 502, 503))
+            if retryable and attempt < 3:
                 time.sleep(2 ** attempt)
                 continue
             if resp.status_code != 200:
@@ -90,36 +114,53 @@ class HealthClient:
     def _get(self, path: str, params: dict | None = None) -> dict:
         return self._request("GET", path, params=params)
 
-    def _post(self, path: str, json_body: dict) -> dict:
-        return self._request("POST", path, json_body=json_body)
+    def _post(self, path: str, json_body: dict, retry_5xx: bool = True) -> dict:
+        return self._request("POST", path, json_body=json_body, retry_5xx=retry_5xx)
 
     # ---- paginated helpers ------------------------------------------------
 
     def _paginate_get(self, path: str, params: dict, items_key: str) -> list[dict]:
         items: list[dict] = []
         page_token = None
-        while True:
+        for _ in range(MAX_PAGES):
             page_params = dict(params)
             if page_token:
                 page_params["pageToken"] = page_token
             body = self._get(path, page_params)
             items.extend(body.get(items_key, []))
-            page_token = body.get("nextPageToken")
-            if not page_token:
+            next_token = body.get("nextPageToken")
+            if not next_token or next_token == page_token:
+                # A token identical to the one we just sent means the server is
+                # not advancing; continuing would re-append the same page until
+                # the process dies. Stop and report what we have.
+                if next_token:
+                    log.warning("pagination stalled on %s (repeating pageToken) — "
+                                "returning %d items", path, len(items))
                 return items
+            page_token = next_token
+        log.warning("pagination hit the %d-page cap on %s — returning %d items "
+                    "(result is INCOMPLETE)", MAX_PAGES, path, len(items))
+        return items
 
     def _paginate_post(self, path: str, json_body: dict, items_key: str) -> list[dict]:
         items: list[dict] = []
         page_token = None
-        while True:
+        for _ in range(MAX_PAGES):
             body_with_token = dict(json_body)
             if page_token:
                 body_with_token["pageToken"] = page_token
             resp = self._post(path, body_with_token)
             items.extend(resp.get(items_key, []))
-            page_token = resp.get("nextPageToken")
-            if not page_token:
+            next_token = resp.get("nextPageToken")
+            if not next_token or next_token == page_token:
+                if next_token:
+                    log.warning("pagination stalled on %s (repeating pageToken) — "
+                                "returning %d items", path, len(items))
                 return items
+            page_token = next_token
+        log.warning("pagination hit the %d-page cap on %s — returning %d items "
+                    "(result is INCOMPLETE)", MAX_PAGES, path, len(items))
+        return items
 
     # ---- reads -----------------------------------------------------------
 
@@ -148,7 +189,8 @@ class HealthClient:
         """
         return self._paginate_get(
             f"users/me/dataTypes/{data_type}/dataPoints",
-            {"filter": filter_str, "pageSize": 1000},
+            {"filter": filter_str,
+             "pageSize": LIST_PAGE_SIZE_BY_TYPE.get(data_type, LIST_PAGE_SIZE)},
             "dataPoints",
         )
 
@@ -169,9 +211,13 @@ class HealthClient:
         point's — so a later delete/adjustment quietly matched nothing and
         the original entry was never actually removed.
         """
+        # retry_5xx=False: this is a CREATE. A 500/502/503 can mean the point
+        # was written and only the response was lost, so an automatic retry
+        # silently duplicates the entry (and the daily totals it feeds).
         op = self._post(
             f"users/me/dataTypes/{data_type}/dataPoints",
             data_point,
+            retry_5xx=False,
         )
         if isinstance(op, dict) and "response" in op:
             if op.get("done") is False:
@@ -189,28 +235,59 @@ class HealthClient:
 
         names: full resource names, e.g.
           'users/me/dataTypes/nutrition-log/dataPoints/{id}'
-        """
-        return self._post(
-            f"users/me/dataTypes/{data_type}/dataPoints:batchDelete",
-            {"names": names},
-        )
 
-    def reconcile(self, data_type: str, start_iso: str, end_iso: str) -> list[dict]:
-        """Merged-across-devices stream (matches what the Google Health app shows).
+        Sent in chunks: the API documents "a maximum of 10000 data points can be
+        deleted in a single request", and one oversized call fails ENTIRELY —
+        which is how "delete all of today's logs" broke once a mirror app had
+        flooded the day with ~20k points (2026-08-21). Chunking well under the
+        cap also keeps a single failure from losing the whole sweep.
 
-        Uses POST with a time range in the request body.
+        Returns {"requested": n, "deleted": n} — `deleted` counts the names in
+        chunks the API accepted, so a partial failure still reports progress
+        before raising.
         """
-        return self._paginate_post(
-            f"users/me/dataTypes/{data_type}/dataPoints:reconcile",
-            {
-                "interval": {
-                    "startTime": start_iso,
-                    "endTime": end_iso,
-                },
-                "pageSize": 10000,
-            },
-            "dataPoints",
-        )
+        if not names:
+            return {"requested": 0, "deleted": 0}
+        deleted = 0
+        for i in range(0, len(names), DELETE_CHUNK_SIZE):
+            chunk = names[i:i + DELETE_CHUNK_SIZE]
+            try:
+                self._post(
+                    f"users/me/dataTypes/{data_type}/dataPoints:batchDelete",
+                    {"names": chunk},
+                )
+            except HealthAPIError:
+                log.error("batchDelete failed for %s after %d/%d points",
+                          data_type, deleted, len(names))
+                raise
+            deleted += len(chunk)
+        if len(names) > DELETE_CHUNK_SIZE:
+            log.info("batchDelete removed %d %s points in %d chunks",
+                     deleted, data_type, (len(names) + DELETE_CHUNK_SIZE - 1) // DELETE_CHUNK_SIZE)
+        return {"requested": len(names), "deleted": deleted}
+
+    def data_points_still_exist(self, names: list[str]) -> list[str]:
+        """Which of `names` Google Health still holds. [] means all are gone.
+
+        A 200 from batchDelete only means the request was accepted — points we
+        are not allowed to remove (another app wrote them) stay put. Callers
+        that are about to drop local history, or to re-log a rescaled entry,
+        MUST confirm the originals are actually gone or the two stores diverge
+        and totals double-count.
+        """
+        still: list[str] = []
+        for name in names:
+            path = name[name.index("users/"):] if "users/" in name else name
+            try:
+                self._get(path)
+                still.append(name)
+            except HealthAPIError as e:
+                if e.status != 404:
+                    # Can't prove it's gone — treat as still present so the
+                    # caller stays on the safe side.
+                    log.warning("could not verify deletion of %s (%s)", name, e.status)
+                    still.append(name)
+        return still
 
     # ---- discovery (smoke test) ------------------------------------------
 

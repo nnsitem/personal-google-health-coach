@@ -182,27 +182,60 @@ def _today_nutrition_totals(user_id: str) -> dict:
             totals["water_ml"] += round(float(hl.get("amountConsumed", {}).get("millilitersSum", 0)))
 
     except Exception:
-        # Fallback to local DB
         log.warning("Google Health rollup failed — falling back to local DB totals")
-        today_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-        cutoff_utc = today_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        with db.connect() as conn:
-            rows = conn.execute(
-                "SELECT content FROM insights WHERE user_id = ? AND kind = 'food_log' AND ts >= ?",
-                (user_id, cutoff_utc),
-            ).fetchall()
-        for row in rows:
-            try:
-                c = json.loads(row["content"])
-            except (json.JSONDecodeError, ValueError):
-                continue
-            totals["kcal"] += round(_num(c.get("calories_kcal")))
-            totals["protein_g"] += round(_num(c.get("protein_g")))
-            totals["fat_g"] += round(_num(c.get("total_fat_g")))
-            totals["carbs_g"] += round(_num(c.get("total_carbohydrate_g")))
-            if c.get("type") == "drink":
-                totals["water_ml"] += round(_num(c.get("volume_ml")))
+        return _local_today_totals(user_id, tz)
 
+    implausible = _implausible_totals(user_id, totals)
+    if implausible:
+        # Google Health aggregates every writer, so one app that mirrors our
+        # entries back in floods the rollup: on 2026-08-21 a Health Connect
+        # bridge (nl.appyhapps.healthsync) had re-imported the day's meals
+        # 19,673 times and the card showed 820,981 kcal against a 3,200 target.
+        # Our own insights history is the honest number in that state.
+        targets = _get_daily_targets(user_id)
+        log.warning(
+            "today's Google Health totals are implausible (%s) — using local DB "
+            "history instead. Another app is probably duplicating entries.",
+            ", ".join(f"{k}={totals[k]} vs target {targets.get(k)}" for k in implausible),
+        )
+        return _local_today_totals(user_id, tz)
+
+    return totals
+
+
+# A rollup this far past the user's own target isn't a big eating day, it's
+# duplicated data. 10x leaves room for a genuinely loose target.
+_IMPLAUSIBLE_FACTOR = 10
+
+
+def _implausible_totals(user_id: str, totals: dict) -> list[str]:
+    """Keys whose total exceeds any sane multiple of the user's own target."""
+    targets = _get_daily_targets(user_id)
+    return [key for key, target in targets.items()
+            if target and totals.get(key, 0) > target * _IMPLAUSIBLE_FACTOR]
+
+
+def _local_today_totals(user_id: str, tz) -> dict:
+    """Today's totals from our own logged history (insights.food_log)."""
+    totals = {"kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "water_ml": 0}
+    today_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff_utc = today_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT content FROM insights WHERE user_id = ? AND kind = 'food_log' AND ts >= ?",
+            (user_id, cutoff_utc),
+        ).fetchall()
+    for row in rows:
+        try:
+            c = json.loads(row["content"])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        totals["kcal"] += round(_num(c.get("calories_kcal")))
+        totals["protein_g"] += round(_num(c.get("protein_g")))
+        totals["fat_g"] += round(_num(c.get("total_fat_g")))
+        totals["carbs_g"] += round(_num(c.get("total_carbohydrate_g")))
+        if c.get("type") == "drink":
+            totals["water_ml"] += round(_num(c.get("volume_ml")))
     return totals
 
 
@@ -632,6 +665,16 @@ def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
                 client = client_for_user(user_id)
                 for dtype, ns in by_type.items():
                     client.batch_delete_data_points(dtype, ns)
+                # VERIFY before claiming success. batchDelete returning 200 is
+                # not proof: points written by another app survive it. Callers
+                # use this return to decide whether to drop the local row
+                # (delete) or to re-log a rescaled copy (adjust), so a false
+                # True either desynchronizes the two stores or double-counts.
+                still = client.data_points_still_exist(names)
+                if still:
+                    log.error("%d of %d points survived deletion (%s) — refusing "
+                              "to report success", len(still), len(names), still[:3])
+                    return False
                 return True
             except HealthAPIError as e:
                 log.error("failed to delete stored points for adjustment: %s", e)
@@ -693,6 +736,20 @@ def delete_log(user_id: str, insight_rowid: int) -> str | None:
     return (content.get("food_name_local") or content.get("food_name_en") or "meal")
 
 
+def _foreign_app(point: dict) -> str | None:
+    """The Android package that wrote this point, or None when we wrote it.
+
+    Google Health refuses to delete anything we did not create:
+        403 PERMISSION_DENIED / DATA_POINT_NOT_OWNED_BY_CLIENT
+    and it rejects the WHOLE batchDelete request, so a single foreign name mixed
+    into the list stops our own entries from being deleted too. Our writes go
+    through the web client and carry no application.packageName; another app's
+    do. Filter on that before asking to delete anything.
+    """
+    app = (point.get("dataSource", {}).get("application") or {})
+    return app.get("packageName")
+
+
 def delete_today_logs(user_id: str, kind: str = "all") -> str:
     """Delete ALL nutrition/hydration entries for the user's current local
     date — every Google Health point with today's civil date (including ones
@@ -715,6 +772,8 @@ def delete_today_logs(user_id: str, kind: str = "all") -> str:
         data_types.append("hydration-log")
 
     counts = {"nutrition-log": 0, "hydration-log": 0}
+    leftover: dict[str, int] = {}
+    leftover_apps: set[str] = set()
     try:
         client = client_for_user(user_id)
         for data_type in data_types:
@@ -724,10 +783,32 @@ def delete_today_logs(user_id: str, kind: str = "all") -> str:
                 f'AND {field}.interval.civil_start_time < "{end}"'
             )
             points = client.list_points(data_type, filter_str)
-            names = [p["name"] for p in points if p.get("name")]
+            # Only our own points — including a foreign one makes Google Health
+            # reject the entire request (DATA_POINT_NOT_OWNED_BY_CLIENT), which
+            # is why "delete all of today" removed nothing at all once a mirror
+            # app had added entries to the same day.
+            names = [p["name"] for p in points if p.get("name") and not _foreign_app(p)]
+            foreign = [p for p in points if _foreign_app(p)]
             if names:
                 client.batch_delete_data_points(data_type, names)
-            counts[data_type] = len(names)
+            # VERIFY. This used to report len(names) — what it TRIED to delete —
+            # as the number removed, so the user was told "cleared N meals"
+            # whether or not anything actually went away. Re-read the day and
+            # count what really disappeared.
+            remaining = client.list_points(data_type, filter_str)
+            counts[data_type] = max(0, len(points) - len(remaining))
+            still_foreign = [p for p in remaining if _foreign_app(p)]
+            if remaining:
+                leftover[data_type] = len(remaining)
+                for p in still_foreign:
+                    leftover_apps.add(_foreign_app(p))
+                log.warning("%d %s points remain for %s after deleting %d of ours "
+                            "(%d belong to other apps: %s)",
+                            len(remaining), data_type, user_id, counts[data_type],
+                            len(still_foreign), ", ".join(sorted(leftover_apps)) or "unknown")
+            if foreign:
+                log.info("skipped %d foreign %s points (not deletable by us)",
+                         len(foreign), data_type)
     except HealthAPIError as e:
         # Don't clear local history if Google Health still holds the points —
         # the two stores must not diverge.
@@ -759,15 +840,28 @@ def delete_today_logs(user_id: str, kind: str = "all") -> str:
             removed_local += 1
 
     total = counts["nutrition-log"] + counts["hydration-log"]
-    if total == 0 and removed_local == 0:
+    if total == 0 and removed_local == 0 and not leftover:
         return labels["nothing_today"]
     parts = []
     if kind in ("food", "all"):
         parts.append(labels["deleted_meals"].format(n=counts["nutrition-log"]))
     if kind in ("drink", "all"):
         parts.append(labels["deleted_drinks"].format(n=counts["hydration-log"]))
-    log.info("cleared today's logs for %s: %s (local rows: %d)", user_id, counts, removed_local)
-    return "🗑️ " + labels["deleted_today"] + " " + " / ".join(parts)
+    log.info("cleared today's logs for %s: %s (local rows: %d, leftover: %s)",
+             user_id, counts, removed_local, leftover or "none")
+    # Nothing removed but entries remain: lead with why, not with "cleared 0".
+    status = ("🗑️ " + labels["deleted_today"] + " " + " / ".join(parts)
+              if total or not leftover else "")
+    if leftover:
+        # Entries we could not remove are almost always written by another app
+        # that mirrors data into Google Health — deleting them here is either
+        # refused or instantly undone by that app's next sync, so say so plainly
+        # instead of implying the day is clean.
+        status += ("\n\n" if status else "") + labels["delete_leftover"].format(
+            n=sum(leftover.values()),
+            apps=", ".join(sorted(leftover_apps)) or "?",
+        )
+    return status
 
 
 def delete_newest_log(user_id: str, kind: str) -> str | None:
@@ -915,11 +1009,13 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
     kind: 'food' -> nutrition-log, 'drink' -> hydration-log.
     Returns the display name of what was deleted, or None if nothing found/failed.
     """
-    from datetime import date, timedelta
     data_type = "hydration-log" if kind == "drink" else "nutrition-log"
     field = data_type.replace("-", "_")
 
-    today = date.today()
+    # The user's local date, not the server's — a mismatch shifts the search
+    # window and can miss the entry that was just logged (or match one from a
+    # neighbouring day).
+    today = datetime.now(db.user_tz(db.get_user(user_id))).date()
     start = (today - timedelta(days=2)).isoformat()
     end = (today + timedelta(days=1)).isoformat()
     filter_str = (
@@ -937,6 +1033,10 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
         log.exception("unexpected error listing %s for delete", data_type)
         return None
 
+    # Skip points another app wrote: we are not allowed to delete them
+    # (DATA_POINT_NOT_OWNED_BY_CLIENT), and picking one would fail the request
+    # while leaving the user's actual newest entry in place.
+    points = [p for p in points if not _foreign_app(p)]
     if not points:
         return None
 
@@ -956,6 +1056,10 @@ def delete_last_log(user_id: str, kind: str = "food") -> str | None:
 
     try:
         client.batch_delete_data_points(data_type, [name])
+        if client.data_points_still_exist([name]):
+            # Accepted but not applied — typically a point another app owns.
+            log.error("%s point %s survived deletion", data_type, name)
+            return None
         log.info("deleted %s data point: %s (%s)", data_type, name, label)
         return label
     except HealthAPIError as e:
@@ -991,7 +1095,9 @@ LABELS = {
         "no_recent_log": "🤔 I couldn't find a recent log to adjust.",
         "delete_failed": "⚠️ Couldn't delete from Google Health — please try again.",
         "nothing_today": "🤷 No logs found for today.",
+        "targets_failed": "⚠️ I could not save your new nutrition targets — please state them again (e.g. \"set target 1800 kcal, 150g protein\").",
         "deleted_today": "Cleared today's logs:",
+        "delete_leftover": "⚠️ {n} entries could NOT be removed — they were written by another app ({apps}), which keeps re-adding them. Turn off its nutrition/hydration sync, then delete them in that app or in Health Connect.",
         "deleted_meals": "{n} meal(s)",
         "deleted_drinks": "{n} drink(s)",
         "ai_busy": "⏳ The AI service is very busy right now, so I couldn't analyze your photo. Please try sending it again in a few minutes!",
@@ -1015,7 +1121,9 @@ LABELS = {
         "no_recent_log": "🤔 ผมไม่พบรายการที่เพิ่งบันทึกไว้ให้ปรับครับ",
         "delete_failed": "⚠️ ยังลบจาก Google Health ไม่สำเร็จครับ ลองใหม่อีกครั้งนะครับ",
         "nothing_today": "🤷 วันนี้ยังไม่มีรายการที่บันทึกไว้ครับ",
+        "targets_failed": "⚠️ ยังบันทึกเป้าโภชนาการใหม่ไม่สำเร็จครับ รบกวนบอกตัวเลขอีกครั้ง (เช่น \"ตั้งเป้า 1800 kcal โปรตีน 150g\")",
         "deleted_today": "ลบรายการของวันนี้แล้ว:",
+        "delete_leftover": "⚠️ ยังมี {n} รายการที่ลบไม่ได้ เพราะถูกเขียนโดยแอปอื่น ({apps}) ซึ่งจะเพิ่มกลับมาเรื่อย ๆ กรุณาปิดการซิงค์โภชนาการ/น้ำของแอปนั้น แล้วลบในแอปนั้นหรือใน Health Connect ครับ",
         "deleted_meals": "อาหาร {n} รายการ",
         "deleted_drinks": "เครื่องดื่ม {n} รายการ",
         "ai_busy": "⏳ ตอนนี้ระบบ AI มีผู้ใช้งานเยอะมาก ผมเลยยังวิเคราะห์รูปไม่ได้ครับ อีกสักครู่ลองส่งรูปมาใหม่นะครับ",
