@@ -134,5 +134,26 @@ class DirectiveSideEffects(unittest.TestCase):
             self.assertEqual(delete_today, expected)
 
 
+class DeviceDataGate(unittest.TestCase):
+    """The pre-chat sync is nine Google Health calls made before the user gets
+    any answer — ~15s normally, 96s during the 2026-08-22 timeouts. A message
+    that only records something has no use for step or sleep data."""
+
+    def test_logging_and_editing_skip_the_sync(self):
+        for text in ("เพิ่มน้ำ 250ml", "บันทึกน้ำ 1 แก้ว", "ลงมื้อเที่ยง ไข่ต้ม 1 ฟอง",
+                     "จดข้าวผัด 1 จาน", "log 2 glasses of water",
+                     "แก้เป็น 750ml", "ลบรายการล่าสุด", "ลบรายการวันนี้ทั้งหมด"):
+            self.assertFalse(chat._needs_device_data(text), text)
+
+    def test_questions_and_conversation_still_sync(self):
+        for text in ("เมื่อคืนนอนเป็นยังไงบ้าง", "วันนี้เดินไปกี่ก้าว",
+                     "วันนี้กินไปกี่แคลแล้ว", "สร้างแผนออกกำลังกายให้หน่อย",
+                     "สวัสดีครับ"):
+            self.assertTrue(chat._needs_device_data(text), text)
+
+    def test_quote_reply_skips_the_sync(self):
+        self.assertFalse(chat._needs_device_data("เพิ่มมื้อเช้า ไข่ต้ม", is_quote_reply=True))
+
+
 if __name__ == "__main__":
     unittest.main()

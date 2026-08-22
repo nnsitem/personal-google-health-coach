@@ -77,14 +77,17 @@ Register the webhook URL `https://<your-host>/webhook` in the LINE Developers co
 ## Tests
 
 ```sh
-docker compose run --rm -v "$PWD/tests:/app/tests" coach python -m unittest discover -s tests -t .
+docker compose run --rm -v "$PWD/coach:/app/coach" -v "$PWD/tests:/app/tests" \
+    coach python -m unittest discover -s tests -t .
 ```
 
-No extra dependencies — stdlib `unittest`, run inside the app image. Every test is
-offline (no Google Health, Gemini or LINE calls) and writes to a throwaway SQLite
-file, never `data/coach.db`; `tests/test_isolation.py` fails the run if that ever
-stops being true. `tests/` is mounted rather than baked into the image so the
-production container stays lean.
+No extra dependencies — stdlib `unittest`, run inside the app image. Both `coach/`
+and `tests/` are mounted so the suite tests the working tree; mounting only
+`tests/` would silently test whatever code was last built into the image.
+
+Every test is offline (no Google Health, Gemini or LINE calls) and writes to a
+throwaway SQLite file, never `data/coach.db` — `tests/test_isolation.py` fails the
+run if that ever stops being true.
 
 ## Smoke tests
 

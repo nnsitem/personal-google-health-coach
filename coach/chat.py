@@ -332,6 +332,11 @@ def _ensure_fresh_data(user_id: str) -> None:
 
     This ensures the chat always has reasonably current data without syncing
     on every single message when messages come in rapid succession.
+
+    The sync is nine Google Health calls made INLINE, before the user gets any
+    answer: ~15s on a good day, and 96s during the health.googleapis.com
+    timeouts of 2026-08-22. Callers skip it when the message can't need device
+    data (see _needs_device_data).
     """
     from datetime import datetime, timedelta, timezone
     from coach.sync import run_sync
@@ -350,6 +355,24 @@ def _ensure_fresh_data(user_id: str) -> None:
         run_sync(user_id)
     except Exception:
         log.warning("sync before chat failed — proceeding with cached data", exc_info=True)
+
+
+def _needs_device_data(text: str, is_quote_reply: bool = False) -> bool:
+    """Whether answering this message could require fresh watch data.
+
+    "เพิ่มน้ำ 250ml" needs nothing from the watch — steps, sleep and exercise
+    have no bearing on writing down a glass of water — yet it paid for a full
+    sync before the reply. Logging, adjusting and deleting are all decided from
+    the message plus our own history, so they skip it; anything else (questions
+    about sleep, steps, recovery, plans, or plain conversation) still syncs.
+    """
+    if _QUESTION_RE.search(text):
+        return True    # "วันนี้เดินไปกี่ก้าว" is exactly what fresh data is for
+    if is_quote_reply:
+        return False   # an adjustment or deletion of an entry we already hold
+    return not (_RECORD_VERB_RE.search(text)
+                or _ADJUST_INTENT_RE.search(text)
+                or _DELETE_INTENT_RE.search(text))
 
 def _build_context_message(user_id: str) -> str:
     """Build a context block with current + historical health data for the agent."""
@@ -458,6 +481,9 @@ _QUESTION_RE = re.compile(
 # half", "make that 750ml"). These share verbs with the log intents above, so
 # without this the extractor would answer a missed ADJUST_LAST by creating a
 # second, phantom entry instead of rescaling the first.
+# Deleting an entry needs nothing from the watch either.
+_DELETE_INTENT_RE = re.compile(r"ลบ|เคลียร์|\bdelete\b|\bremove\b|\bclear\b", re.IGNORECASE)
+
 # แก้(?!ว) because แก้ว ("glass") merely contains แก้ ("to change") — without
 # the guard, "บันทึกน้ำ 1 แก้ว" reads as a revision and never gets logged.
 _ADJUST_INTENT_RE = re.compile(
@@ -598,9 +624,14 @@ def handle_message(user_id: str, user_text: str,
         except Exception:
             log.exception("failed to resolve quoted message %s", quoted_message_id)
 
-    # Always refresh health data before responding so the coach has the latest.
-    # Only skip if the last sync was very recent (< 10 minutes ago).
-    _ensure_fresh_data(user_id)
+    # Refresh health data first, but only when the answer could depend on it.
+    # A log/adjust/delete request is decided from the message plus our own
+    # history, so it no longer waits on nine Google Health calls to be told
+    # about steps it never mentions.
+    if _needs_device_data(user_text, is_quote_reply=bool(quoted_message_id)):
+        _ensure_fresh_data(user_id)
+    else:
+        log.info("skipping pre-chat sync — this message needs no device data")
 
     # Store user message
     _save_chat_message(user_id, "user", user_text)

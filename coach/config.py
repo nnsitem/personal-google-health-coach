@@ -49,6 +49,13 @@ GEMINI_FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-pro-latest"]
 # Total time budget (seconds) to keep retrying Gemini across models. Replies go
 # via LINE push (not a time-limited reply token), so we can afford a long window.
 GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
+# Hard ceiling on a SINGLE Gemini HTTP request. The SDK applies none by
+# default, and on 2026-08-22 one generateContent call hung for 30 minutes
+# before finally answering 502 — the user's "เพิ่มน้ำ 250ml" was logged and
+# answered half an hour later, long after the LINE reply token had expired.
+# GEMINI_MAX_WAIT_SECONDS only decides whether to start another round; it
+# cannot interrupt a request already in flight, so this is what bounds it.
+GEMINI_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("GEMINI_REQUEST_TIMEOUT_SECONDS", "30"))
 
 # Daily summary delivery time (local TZ)
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "10"))

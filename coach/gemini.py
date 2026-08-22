@@ -36,12 +36,17 @@ from zoneinfo import ZoneInfo
 
 from google import genai
 
-from coach.config import GEMINI_MODEL, GEMINI_FALLBACK_MODELS, GEMINI_MAX_WAIT_SECONDS
+from coach.config import (GEMINI_MODEL, GEMINI_FALLBACK_MODELS,
+                          GEMINI_MAX_WAIT_SECONDS, GEMINI_REQUEST_TIMEOUT_SECONDS)
 
 log = logging.getLogger(__name__)
 
 # Errors that are transient — worth retrying after a cooldown.
-_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL")
+# "timeout"/"timed out" included so a model that stalls gets a cooldown like any
+# other transient fault, instead of being retried straight into another stall.
+_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500",
+                      "INTERNAL", "502", "Bad Gateway", "504", "DEADLINE_EXCEEDED",
+                      "Deadline", "timeout", "timed out", "Timeout", "ReadTimeout")
 # Errors meaning "this model won't work for this key" — drop from rotation.
 _SKIP_MARKERS = ("404", "NOT_FOUND", "PERMISSION_DENIED")
 
@@ -101,6 +106,35 @@ def _seconds_until_quota_reset() -> float:
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
     tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return (tomorrow - now).total_seconds() + 60  # small buffer past the reset
+
+
+def _http_options():
+    """Per-request timeout, and no retrying inside the SDK.
+
+    Two separate problems, one object:
+
+    - No timeout is the SDK default, so a stalled connection blocks forever.
+      One call hung for 30m32s on 2026-08-22 and the reply arrived after the
+      LINE reply token had died.
+    - The SDK retries 5 times by default (408/429/5xx) against the SAME model
+      with its own backoff. That competes with the rotation below, which is
+      strictly better informed: it moves to a different capacity tier, parks a
+      model whose daily quota is spent, and honors a server retryDelay. Letting
+      the SDK burn the budget on a model we already know is failing just delays
+      the failover — a 503 took ~14s to surface instead of ~2s.
+
+    Returns None when the installed SDK predates these fields, leaving the old
+    behavior rather than failing to build a client at all.
+    """
+    try:
+        return genai.types.HttpOptions(
+            timeout=GEMINI_REQUEST_TIMEOUT_SECONDS * 1000,   # milliseconds
+            retry_options=genai.types.HttpRetryOptions(attempts=1),
+        )
+    except Exception:
+        log.warning("this google-genai build has no HttpOptions timeout/retry_options — "
+                    "requests will be unbounded", exc_info=True)
+        return None
 
 
 def _thinking_config(model: str):
@@ -164,7 +198,7 @@ def generate(
     if max_wait is None:
         max_wait = GEMINI_MAX_WAIT_SECONDS
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options=_http_options())
     models = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
 
     def _build_config(model: str):
