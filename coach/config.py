@@ -39,27 +39,36 @@ TZ = ZoneInfo(os.environ.get("TZ", "UTC"))
 
 # Gemini (Google AI) settings
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-# Fallback models if primary is unavailable — each must be a genuinely different
-# capacity tier or a flash 503 spike takes out the whole chain. Note that
-# gemini-flash-latest is an alias for gemini-3.5-flash (since 2026-05-19), so
-# listing 3.5-flash as a fallback adds nothing; flash-lite and pro run on
-# separate capacity (verified responsive during a flash 503 outage).
-# Ordered STRONGEST FIRST. It used to fall back to flash-lite before pro, so the
-# first thing tried after a flash outage was the weakest model available — the
-# wrong direction when the answer is a nutrition estimate the user will act on.
-GEMINI_FALLBACK_MODELS = ["gemini-pro-latest", "gemini-flash-lite-latest"]
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-pro-latest")
+# Chosen for STABILITY, measured 2026-08-23 with 5 identical calls per model:
+#
+#   5/5  gemini-3.5-flash-lite      p50 1.02s  max  1.13s
+#   5/5  gemini-flash-lite-latest   p50 1.14s  max  1.23s
+#   5/5  gemini-3.7-flash           p50 2.65s  max  6.97s
+#   5/5  gemini-pro-latest          p50 2.72s  max  3.74s
+#   5/5  gemini-3.6-flash           p50 8.50s  max 14.97s
+#   5/5  gemini-3.5-flash           p50 11.30s max 13.42s
+#   3/5  gemini-flash-latest        ConnectError + 503        <- the only failure
+#
+# gemini-flash-latest had been the primary, and it is the one model that failed —
+# matching every incident of 2026-08-22/23: a 502, a 503, and a request that hung
+# 30m32s. An alias tracking the newest release rides the least settled capacity.
+# gemini-pro-latest was perfect here, has the tightest spread of the capable
+# models, accepts every thinking level, and is the most accurate — so it serves
+# both this instruction and the accuracy-first one.
+#
+# Fallbacks are pinned GA versions rather than aliases: no silent tier change,
+# and neither has an announced shutdown date. Slower than the aliases, which the
+# owner has explicitly deprioritised. gemini-3.7-flash is left out despite 5/5
+# here because it answered 503 on every thinking level an hour earlier.
+#
+# Re-measure occasionally: pinned models do not auto-upgrade.
+GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 
 # Used for calls where a wrong number is worse than a slow answer: estimating a
 # meal's nutrition from a photo, and the chat turn that writes the log entry.
 GEMINI_ACCURACY_MODEL = os.environ.get("GEMINI_ACCURACY_MODEL", "gemini-pro-latest")
 
-# Thinking effort. Measured 2026-08-23 on a nutrition question with a known
-# answer (~525 kcal): LOW -> 514, MEDIUM -> 524, HIGH -> 525, costing 531 / 929 /
-# 2103 thinking tokens. MINIMAL is now rejected outright (400 INVALID_ARGUMENT),
-# and MEDIUM/HIGH currently answer 503 on the flash tiers, so LOW is the highest
-# level that is universally available. Raise it here if that changes — and raise
-# the output caps with it, since thinking tokens share that budget.
 GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "LOW")
 # Total time budget (seconds) to keep retrying Gemini across models. Replies go
 # via LINE push (not a time-limited reply token), so we can afford a long window.

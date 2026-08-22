@@ -90,13 +90,20 @@ class AccuracyFirst(unittest.TestCase):
             pass
         return list(self.tried)
 
-    def test_first_fallback_is_stronger_not_weaker(self):
-        # The chain used to fall back to flash-lite before pro, so the first
-        # thing tried after a flash outage was the weakest model available.
+    def test_configured_primary_is_tried_first(self):
+        self.assertEqual(self._order()[0], GEMINI_MODEL)
+
+    def test_weakest_tier_is_the_last_resort(self):
+        # The chain used to reach flash-lite BEFORE pro, so the first substitute
+        # after an outage was the weakest model in the account.
         order = self._order()
-        self.assertEqual(order[0], GEMINI_MODEL)
-        self.assertEqual(order[1], "gemini-pro-latest")
-        self.assertEqual(order[-1], "gemini-flash-lite-latest")
+        self.assertIn("lite", order[-1])
+        self.assertFalse([m for m in order[:-1] if "lite" in m], order)
+
+    def test_the_unstable_alias_is_not_in_the_chain(self):
+        # gemini-flash-latest was the only model to fail the 2026-08-23
+        # stability probe (3/5), and every incident that day involved it.
+        self.assertNotIn("gemini-flash-latest", self._order())
 
     def test_prefer_accuracy_leads_with_the_strong_model(self):
         order = self._order(prefer_accuracy=True)
