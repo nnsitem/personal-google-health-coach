@@ -323,7 +323,7 @@ def _generate_nudge_message(user_id: str, condition: str) -> str:
     try:
         return gemini.generate(
             api_key, contents=user_message, system_instruction=NUDGE_SYSTEM_PROMPT,
-            max_output_tokens=1024, min_chars=20,
+            max_output_tokens=4096, min_chars=20,
         )
     except Exception:
         log.warning("nudge generation failed, using raw condition")

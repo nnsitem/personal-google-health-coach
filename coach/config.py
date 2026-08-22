@@ -45,7 +45,22 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 # gemini-flash-latest is an alias for gemini-3.5-flash (since 2026-05-19), so
 # listing 3.5-flash as a fallback adds nothing; flash-lite and pro run on
 # separate capacity (verified responsive during a flash 503 outage).
-GEMINI_FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-pro-latest"]
+# Ordered STRONGEST FIRST. It used to fall back to flash-lite before pro, so the
+# first thing tried after a flash outage was the weakest model available — the
+# wrong direction when the answer is a nutrition estimate the user will act on.
+GEMINI_FALLBACK_MODELS = ["gemini-pro-latest", "gemini-flash-lite-latest"]
+
+# Used for calls where a wrong number is worse than a slow answer: estimating a
+# meal's nutrition from a photo, and the chat turn that writes the log entry.
+GEMINI_ACCURACY_MODEL = os.environ.get("GEMINI_ACCURACY_MODEL", "gemini-pro-latest")
+
+# Thinking effort. Measured 2026-08-23 on a nutrition question with a known
+# answer (~525 kcal): LOW -> 514, MEDIUM -> 524, HIGH -> 525, costing 531 / 929 /
+# 2103 thinking tokens. MINIMAL is now rejected outright (400 INVALID_ARGUMENT),
+# and MEDIUM/HIGH currently answer 503 on the flash tiers, so LOW is the highest
+# level that is universally available. Raise it here if that changes — and raise
+# the output caps with it, since thinking tokens share that budget.
+GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "LOW")
 # Total time budget (seconds) to keep retrying Gemini across models. Replies go
 # via LINE push (not a time-limited reply token), so we can afford a long window.
 GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
@@ -55,7 +70,10 @@ GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
 # answered half an hour later, long after the LINE reply token had expired.
 # GEMINI_MAX_WAIT_SECONDS only decides whether to start another round; it
 # cannot interrupt a request already in flight, so this is what bounds it.
-GEMINI_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("GEMINI_REQUEST_TIMEOUT_SECONDS", "30"))
+# 120s, not 30s: accuracy is preferred over speed here, and cutting off a slow
+# but correct answer only to retry on a weaker model is the wrong trade. Still a
+# hard bound — the incident this exists for was a single request hanging 30m32s.
+GEMINI_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("GEMINI_REQUEST_TIMEOUT_SECONDS", "120"))
 
 # Daily summary delivery time (local TZ)
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "10"))

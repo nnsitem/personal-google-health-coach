@@ -10,7 +10,8 @@ import time
 import unittest
 
 from coach import gemini
-from coach.config import GEMINI_REQUEST_TIMEOUT_SECONDS
+from coach.config import (GEMINI_ACCURACY_MODEL, GEMINI_MODEL,
+                          GEMINI_REQUEST_TIMEOUT_SECONDS, GEMINI_THINKING_LEVEL)
 
 
 class HttpOptions(unittest.TestCase):
@@ -61,6 +62,58 @@ class HangingModel(unittest.TestCase):
         with self.assertRaises(gemini.GeminiUnavailable):
             gemini.generate("fake-key", contents="hi", max_wait=4)
         self.assertLess(time.time() - started, 20)
+
+
+class AccuracyFirst(unittest.TestCase):
+    """The user's stated preference: a slower answer beats a wrong number."""
+
+    def setUp(self):
+        gemini._cooldown_until.clear()
+        self.addCleanup(gemini._cooldown_until.clear)
+        self.tried = []
+
+        class Spy:
+            class models:
+                @staticmethod
+                def generate_content(model, **kwargs):
+                    self.tried.append(model)
+                    raise RuntimeError("404 NOT_FOUND")
+
+        real = gemini.genai.Client
+        gemini.genai.Client = lambda **kwargs: Spy()
+        self.addCleanup(setattr, gemini.genai, "Client", real)
+
+    def _order(self, **kwargs):
+        try:
+            gemini.generate("k", contents="x", max_wait=1, **kwargs)
+        except gemini.GeminiUnavailable:
+            pass
+        return list(self.tried)
+
+    def test_first_fallback_is_stronger_not_weaker(self):
+        # The chain used to fall back to flash-lite before pro, so the first
+        # thing tried after a flash outage was the weakest model available.
+        order = self._order()
+        self.assertEqual(order[0], GEMINI_MODEL)
+        self.assertEqual(order[1], "gemini-pro-latest")
+        self.assertEqual(order[-1], "gemini-flash-lite-latest")
+
+    def test_prefer_accuracy_leads_with_the_strong_model(self):
+        order = self._order(prefer_accuracy=True)
+        self.assertEqual(order[0], GEMINI_ACCURACY_MODEL)
+        # ...but still falls through, so an accuracy call is never left unanswered.
+        self.assertIn(GEMINI_MODEL, order)
+
+
+class ThinkingLadder(unittest.TestCase):
+    def test_minimal_is_gone(self):
+        # The API answers 400 INVALID_ARGUMENT for MINIMAL as of 2026-08-23, so
+        # keeping it first burned one wasted call per model per process.
+        self.assertNotIn("MINIMAL", gemini._THINKING_LADDER)
+
+    def test_starts_at_the_configured_level_then_degrades(self):
+        self.assertEqual(gemini._THINKING_LADDER[0], GEMINI_THINKING_LEVEL)
+        self.assertIsNone(gemini._THINKING_LADDER[-1])
 
 
 if __name__ == "__main__":

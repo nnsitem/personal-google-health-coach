@@ -573,7 +573,7 @@ def _extract_log_fallback(user_id: str, user_text: str, api_key: str) -> list[tu
         text = gemini.generate(
             api_key, contents="\n\n".join(prompt_parts),
             system_instruction=_LOG_EXTRACTOR_PROMPT,
-            max_output_tokens=1536, min_chars=2, max_wait=45,
+            max_output_tokens=4096, min_chars=2, max_wait=120, prefer_accuracy=True,
         )
     except Exception:
         log.warning("extractor call failed — leaving the turn unlogged", exc_info=True)
@@ -690,7 +690,7 @@ def handle_message(user_id: str, user_text: str,
         # Shorter budget than scheduled jobs — a person is waiting in chat.
         reply = gemini.generate(
             api_key, contents=full_prompt, system_instruction=CHAT_SYSTEM_PROMPT,
-            max_output_tokens=2048, min_chars=10, max_wait=60,
+            max_output_tokens=4096, min_chars=10, max_wait=180, prefer_accuracy=True,
         )
     except gemini.GeminiQuotaExhausted:
         log.warning("Gemini daily quota exhausted for user %s", user_id)

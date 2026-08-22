@@ -332,7 +332,7 @@ def generate_daily_narrative(user_id: str, snapshot: dict | None = None) -> str:
 
     text = gemini.generate(
         api_key, contents=user_message, system_instruction=DAILY_NARRATIVE_PROMPT,
-        max_output_tokens=1024, min_chars=20,
+        max_output_tokens=4096, min_chars=20,
     )
 
     with db.connect() as conn:
@@ -369,7 +369,7 @@ def generate_daily_summary(user_id: str, snapshot: dict | None = None) -> str:
 
     message_text = gemini.generate(
         api_key, contents=user_message, system_instruction=SYSTEM_PROMPT,
-        max_output_tokens=2048, min_chars=50,
+        max_output_tokens=4096, min_chars=50,
     )
 
     # Store the generated insight

@@ -62,7 +62,7 @@ def create_workout_plan(user_id: str, user_request: str, context: dict) -> dict:
 
     text = gemini.generate(
         api_key, contents=prompt, system_instruction=PLAN_SYSTEM_PROMPT,
-        max_output_tokens=2048,
+        max_output_tokens=4096, prefer_accuracy=True,
     )
     plan = _extract_json(text)
     if plan:

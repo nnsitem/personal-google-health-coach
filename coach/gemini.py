@@ -36,8 +36,9 @@ from zoneinfo import ZoneInfo
 
 from google import genai
 
-from coach.config import (GEMINI_MODEL, GEMINI_FALLBACK_MODELS,
-                          GEMINI_MAX_WAIT_SECONDS, GEMINI_REQUEST_TIMEOUT_SECONDS)
+from coach.config import (GEMINI_MODEL, GEMINI_FALLBACK_MODELS, GEMINI_ACCURACY_MODEL,
+                          GEMINI_MAX_WAIT_SECONDS, GEMINI_REQUEST_TIMEOUT_SECONDS,
+                          GEMINI_THINKING_LEVEL)
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,10 @@ _cooldown_until: dict[tuple[str, str], float] = {}
 # rejects MINIMAL but accepts LOW), so each model climbs this ladder on a
 # config-rejection 400 and the winning rung is cached for the process lifetime —
 # without the cache the bad config would be re-sent on every retry round.
-_THINKING_LADDER = ("MINIMAL", "LOW", None)  # None = model's default (dynamic)
+# Starts at the configured level and degrades only when a model REJECTS it.
+# "MINIMAL" used to be first; the API now answers 400 INVALID_ARGUMENT for it, so
+# every model burned one wasted call per process just discovering that.
+_THINKING_LADDER = (GEMINI_THINKING_LEVEL, None)  # None = model's own default
 _model_thinking_rung: dict[str, int] = {}
 
 
@@ -185,6 +189,7 @@ def generate(
     max_output_tokens: int = 2048,
     max_wait: int | None = None,
     min_chars: int = 1,
+    prefer_accuracy: bool = False,
 ) -> str:
     """Generate content, retrying across models until success or timeout.
 
@@ -199,7 +204,13 @@ def generate(
         max_wait = GEMINI_MAX_WAIT_SECONDS
 
     client = genai.Client(api_key=api_key, http_options=_http_options())
-    models = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+    # prefer_accuracy puts the strongest model first for calls where a wrong
+    # number is worse than a slow answer (a meal's nutrition, which the user
+    # then acts on). Everything else leads with the faster default and keeps it
+    # as the first fallback, so an accuracy call still gets an answer if the
+    # strong tier is down.
+    chain = [GEMINI_ACCURACY_MODEL, GEMINI_MODEL] if prefer_accuracy else [GEMINI_MODEL]
+    models = chain + [m for m in GEMINI_FALLBACK_MODELS if m not in chain]
 
     def _build_config(model: str):
         cfg_kwargs = {"max_output_tokens": max_output_tokens}

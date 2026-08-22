@@ -404,7 +404,7 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
         # Shorter budget than scheduled jobs — a person is waiting in chat.
         text = gemini.generate(
             api_key, contents=[prompt, image_part],
-            max_output_tokens=1536, max_wait=60,
+            max_output_tokens=4096, max_wait=180, prefer_accuracy=True,
         )
     except gemini.GeminiUnavailable:
         # Capacity outage, not a vision failure — let the caller tell the user
