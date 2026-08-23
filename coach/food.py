@@ -39,6 +39,7 @@ If it's FOOD, use this shape:
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
+  "volume_ml": number or null,
   "notes": "one short sentence on assumptions (portion size, ingredients)"
 }
 
@@ -75,6 +76,16 @@ DRINK volume rules (important — read carefully):
 
 Estimate realistic values for what's shown. If there is no drink container at all
 in the photo, set "type" to "unknown".
+
+Anything DRINKABLE is a DRINK, even when it is thick, blended, or a meal in
+itself: smoothies, protein shakes, blended juices, milk, yoghurt drinks. Use
+"type": "drink" and fill "volume_ml" — the drink shape records BOTH the fluid
+and its nutrition, so nothing is lost. Classifying a smoothie as "food" throws
+away the fluid: it is what made a 350 kcal Boost smoothie count for 0 ml of the
+day's hydration.
+If you do return "type": "food" for something that still contains a real
+quantity of liquid (soup, congee, a bowl of broth), set "volume_ml" to the
+drinkable portion so it is counted as fluid too. Leave it null for solid food.
 
 "coaching_suggestion" rules — this field is REQUIRED in every response, food or
 drink, and must never be an empty string:
@@ -271,8 +282,9 @@ def _local_today_totals(user_id: str, tz) -> dict:
         totals["protein_g"] += round(_num(c.get("protein_g")))
         totals["fat_g"] += round(_num(c.get("total_fat_g")))
         totals["carbs_g"] += round(_num(c.get("total_carbohydrate_g")))
-        if c.get("type") == "drink":
-            totals["water_ml"] += round(_num(c.get("volume_ml")))
+        # Any entry carrying a volume counts as fluid, not just type=="drink" —
+        # a smoothie logged as food is still something the user drank.
+        totals["water_ml"] += round(_num(c.get("volume_ml")))
     return totals
 
 
@@ -559,6 +571,25 @@ def log_hydration_to_health(user_id: str, analysis: dict) -> tuple[bool, str | N
         return False, None
 
 
+def _log_fluid_for_food(user_id: str, analysis: dict) -> str | None:
+    """Also record a FOOD entry's liquid portion as fluid intake.
+
+    The drink path has always written both a hydration point and (when caloric)
+    a nutrition point. The food path wrote nutrition only, so anything drinkable
+    that the model happened to classify as "food" lost its volume entirely: a
+    350 kcal Boost smoothie logged 0 ml of hydration, and protein shakes were
+    stored with the volume sitting in the display name ("เวย์โปรตีน (300 มล.)")
+    where nothing could read it. Returns the hydration point name, or None when
+    there is no liquid to record.
+    """
+    if _num(analysis.get("volume_ml")) <= 0:
+        return None
+    synced, point = log_hydration_to_health(user_id, analysis)
+    if synced:
+        log.info("also logged %s ml of fluid for a food entry", analysis.get("volume_ml"))
+    return point
+
+
 def _store_food_log(user_id: str, analysis: dict, synced: bool) -> int:
     """Record the food log locally (for history + weekly reports).
 
@@ -654,10 +685,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
     if round(analysis.get("calories_kcal") or 0) <= 0:
         return labels["empty_food"], None
     synced, point_name = log_food_to_health(user_id, analysis)
+    fluid_point = _log_fluid_for_food(user_id, analysis)
     rowid = _store_food_log(
         user_id,
         {**analysis, "type": "food", "source": "chat",
-         "health_point_names": [n for n in (point_name,) if n]},
+         "health_point_names": [n for n in (point_name, fluid_point) if n]},
         synced,
     )
 
@@ -737,6 +769,8 @@ def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
         return False
     if kind == "drink" and _num(content.get("calories_kcal")) > 10:
         delete_last_log(user_id, "food")  # caloric drink's nutrition twin, best-effort
+    elif kind == "food" and _num(content.get("volume_ml")) > 0:
+        delete_last_log(user_id, "drink")  # liquid food's hydration twin, best-effort
     return True
 
 
@@ -1030,6 +1064,13 @@ def adjust_last_log(user_id: str, params: dict | None,
         synced, food_point = log_food_to_health(user_id, scaled)
         if food_point:
             new_points.append(food_point)
+        # A liquid food (smoothie, soup) carries a volume that was rescaled with
+        # everything else; re-log it or the adjustment would silently drop the
+        # fluid the original entry recorded.
+        if synced:
+            fluid_point = _log_fluid_for_food(user_id, scaled)
+            if fluid_point:
+                new_points.append(fluid_point)
     scaled["health_point_names"] = new_points
 
     with db.connect() as conn:
@@ -1217,9 +1258,10 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         return labels["empty_food"], None
 
     synced, point_name = log_food_to_health(user_id, analysis)
+    fluid_point = _log_fluid_for_food(user_id, analysis)
     rowid = _store_food_log(
         user_id,
-        {**analysis, "health_point_names": [n for n in (point_name,) if n]},
+        {**analysis, "health_point_names": [n for n in (point_name, fluid_point) if n]},
         synced,
     )
 

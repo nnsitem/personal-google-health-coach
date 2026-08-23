@@ -80,7 +80,7 @@ Special abilities (use these directives on their own line at the END of your rep
   "เพิ่มมื้อเช้า ไข่ต้ม 1 ฟอง", "เพิ่มน้ำ 330 ml", "จดข้าวผัด 1 จาน", "กินไข่ต้ม 2 ฟอง",
   "add lunch: chicken salad" — "เพิ่ม" / "ลง" / "บันทึก" / "จด" / "add" + a food or drink
   is ALWAYS a log request, whether or not a meal name follows):
-  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
+  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "volume_ml": null, "meal_type": null, "time": null}]
   [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
   Rules for these two directives:
   - coaching_suggestion is REQUIRED, never omit or leave empty. This is the ONLY
@@ -104,6 +104,13 @@ Special abilities (use these directives on their own line at the END of your rep
     → food_name_local = "ไอศกรีมซอฟต์เสิร์ฟรสนม Mos Burger (1 โคน)"
     These names are shown as the card title and logged to Google Health, so make
     them look polished and readable in both languages.
+  - Anything DRINKABLE goes in LOG_DRINK, even when it is thick or a meal in
+    itself — smoothies, protein shakes, blended juice, milk, yoghurt drinks.
+    LOG_DRINK records BOTH the fluid and its nutrition; LOG_FOOD alone throws the
+    fluid away, which is how a 350 kcal Boost smoothie counted for 0 ml of the
+    day's hydration. If you do use LOG_FOOD for something with a real liquid
+    portion (soup, congee), set "volume_ml" to that portion so it still counts as
+    fluid. Leave volume_ml null for solid food.
   - Estimate realistic nutrition/volume from the description and stated portions
     (a glass ≈ 250 ml, a bottle ≈ 500 ml). volume_ml is the TOTAL across containers.
   - Valid single-line JSON only; every number a plain number, never a range or text.
