@@ -415,6 +415,11 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
         f"Already logged today (before this item), vs daily target: {totals_line}"
     )
 
+    # Bound the upload. Ordinary LINE photos (<=1.64 MP) are unaffected; this
+    # exists so a full-resolution photo arriving through another path can't turn
+    # one meal into a multi-megabyte request.
+    from coach.images import VISION_MAX_EDGE, downscale
+    image_bytes = downscale(image_bytes, VISION_MAX_EDGE, mime_type)
     image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
     try:
         # Shorter budget than scheduled jobs — a person is waiting in chat.

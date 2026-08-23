@@ -1,8 +1,13 @@
 # Personal Google Health AI Coach — Design
 
-A self-hosted service that pulls your Google Health (Fitbit / Pixel Watch) data hourly, mirrors the coaching features of **Google Health Premium Coach** using Claude as the AI engine, and delivers summaries and nudges to your **WhatsApp** chat — with two-way conversation support.
+A self-hosted service that pulls Google Health (Fitbit / Pixel Watch) data hourly,
+mirrors the coaching features of **Google Health Premium Coach** using **Gemini** as
+the AI engine, and delivers summaries, nudges and two-way chat over **LINE**.
 
-*Designed: 2026-07-14, based on the API landscape as of that date.*
+*Originally designed 2026-07-14. Rewritten 2026-08-23 to describe what was actually
+built — see [§9](#9-changed-since-the-original-design) for what changed and why, and
+[§10](#10-operational-facts-learned-the-hard-way) for the API and model behaviour
+that only surfaced in production.*
 
 ---
 
@@ -11,13 +16,14 @@ A self-hosted service that pulls your Google Health (Fitbit / Pixel Watch) data 
 | Question | Finding |
 |---|---|
 | How do I read Google Health data programmatically? | The **Google Health API** (`https://health.googleapis.com/v4/`) is the current, supported path. It launched in 2026 as the unified successor to both the Google Fit REST API (closed to new signups since May 2024, sunset end of 2026) and the Fitbit Web API (**shuts down September 2026**). It returns data from all Fitbit devices and Pixel Watches. |
-| Auth model | Standard **Google OAuth 2.0** with `googlehealth.*` readonly scopes (activity_and_fitness, sleep, health_metrics_and_measurements). Scopes are classified "Restricted" for published apps, but a personal-use OAuth app in *Testing* mode with yourself as the only test user needs no verification review. |
-| Data available | 31+ data types via four read methods: `list` (raw points), `reconcile` (merged across devices — matches what the Fitbit app shows), `rollUp` (windowed aggregates), `dailyRollUp` (civil-day aggregates). Heart rate at ~5-second resolution, sleep sessions with stages, steps, calories, resting HR; HRV, SpO₂, ECG, and more landing through Q2–Q3 2026. |
-| What does Google Health Premium Coach actually do? | (So we can mirror it.) Launched May 2026 at $9.99/mo: proactive daily insights and nudges on the Today tab; tailored workout suggestions and multi-week adaptive plans; sleep consistency tracking and restorative-rest goals; readiness/recovery analysis; cycle & nutrition insights; medical-record summaries; 24/7 conversational coach with memory of your goals that learns from feedback. |
-| How do I send to WhatsApp? | **Meta WhatsApp Cloud API** (the only integration path since Oct 2025). Free tier without business verification: up to 250 business-initiated conversations per rolling 24 h and 2 phone numbers — far more than a personal coach needs. Utility template messages are free inside an open 24-hour service window, and user-initiated (service) conversations are free and unlimited. |
-| Two-way chat? | Cloud API webhooks deliver inbound messages to our server. Any reply within 24 h of the user's last message is a free-form message (no template needed). This makes the "chat with your coach" feature natural: you message the coach, the coach replies — and every message you send re-opens the free window for the next day's summaries. |
+| Auth model | Standard **Google OAuth 2.0** with `googlehealth.*` scopes. Since May 2026 read and write are separate scopes (`.readonly` / `.writeonly`) — logging food needs both. Scopes are "Restricted" for published apps, but a personal-use OAuth app in *Testing* mode with your own account as test user needs no verification review. |
+| Data available | 31+ data types via four read methods: `list` (raw points), `reconcile` (merged across devices), `rollUp` (windowed aggregates), `dailyRollUp` (civil-day aggregates). Confirmed working on a live account: steps, total calories, active-zone-minutes, resting HR, HRV, SpO₂, respiratory rate, sleep with stages, exercise sessions, plus nutrition-log and hydration-log for writes. |
+| What does Google Health Premium Coach actually do? | (So we can mirror it.) Launched May 2026 at $9.99/mo: proactive daily insights and nudges, tailored workout suggestions and multi-week adaptive plans, sleep consistency tracking, readiness/recovery analysis, cycle & nutrition insights, medical-record summaries, and a 24/7 conversational coach with memory. |
+| How do I message the user? | **LINE Messaging API**. Replies to a webhook event are free and unlimited; pushes count against a per-bot monthly quota (500 on the free plan). Flex Messages give real layout — stat cards, charts, carousels — which a plain-text channel cannot. |
+| Two-way chat? | LINE webhooks deliver inbound messages to our HTTPS endpoint. Every reply is free-form; there is no 24-hour service window to manage. |
 
-**Key deadline:** anything built on the legacy Fitbit Web API dies September 2026. Building directly on the Google Health API avoids a forced migration two months in.
+**Key deadline:** anything built on the legacy Fitbit Web API dies September 2026.
+Building directly on the Google Health API avoids a forced migration.
 
 ---
 
@@ -27,36 +33,40 @@ A self-hosted service that pulls your Google Health (Fitbit / Pixel Watch) data 
 flowchart LR
     subgraph Google
         GH[Google Health API v4<br/>health.googleapis.com]
+        GEM[Gemini API<br/>generativelanguage.googleapis.com]
     end
 
     subgraph "Coach Service (Docker on Mac mini — portable to Windows/Linux)"
-        SCHED[Scheduler<br/>hourly + daily cron]
-        ING[Ingestion worker<br/>OAuth + incremental sync]
-        DB[(SQLite<br/>metrics, insights, chat memory)]
-        COACH[Coach engine<br/>Claude Opus 4.8<br/>tools + memory]
-        WA_OUT[WhatsApp sender]
-        WA_IN[Webhook receiver<br/>inbound messages]
+        SCHED[APScheduler<br/>in-process cron]
+        ING[Sync worker<br/>OAuth + 48h re-read]
+        DB[(SQLite<br/>metrics, insights, chat, memory)]
+        COACH[Coach engine<br/>prompts + directives]
+        LINE_OUT[LINE sender<br/>text + Flex]
+        LINE_IN[Webhook receiver]
+        WD[Watchdog]
     end
 
-    subgraph Meta
-        WACA[WhatsApp Cloud API]
-    end
-
-    PHONE[Your WhatsApp]
+    PHONE[Your LINE app]
 
     SCHED --> ING
     GH -->|readonly OAuth| ING --> DB
     SCHED --> COACH
     DB <--> COACH
-    COACH --> WA_OUT --> WACA --> PHONE
-    PHONE --> WACA -->|webhook| WA_IN --> COACH
+    COACH <--> GEM
+    COACH -->|nutrition-log<br/>hydration-log| GH
+    COACH --> LINE_OUT --> PHONE
+    PHONE --> LINE_IN --> COACH
+    WD -.->|restart on failure| LINE_IN
 ```
 
 Three loops share one data store and one coach engine:
 
-1. **Hourly loop** — sync new data; run cheap rule-based checks; call the coach only when a nudge condition fires.
-2. **Daily loop** — morning summary (yesterday + sleep + today's plan); optional evening wind-down message.
-3. **Chat loop** — event-driven; inbound WhatsApp message → coach agent with conversation memory → reply.
+1. **Hourly loop** — sync the trailing 48 h; run cheap rule-based checks; call Gemini
+   only when a nudge condition fires.
+2. **Daily / weekly loop** — morning brief and Sunday report, dispatched per user's
+   own timezone.
+3. **Chat loop** — event-driven; inbound LINE message → coach → reply, including food
+   and drink logging that writes back to Google Health.
 
 ---
 
@@ -64,128 +74,146 @@ Three loops share one data store and one coach engine:
 
 ### 3.1 Ingestion (Google Health API)
 
-- **OAuth setup (one-time):** Google Cloud project → enable Google Health API → OAuth consent screen in *Testing* mode with your account as test user → Desktop-app OAuth client → run a local auth flow once, persist the refresh token.
-- **Scopes:** `googlehealth.activity_and_fitness.readonly`, `googlehealth.sleep.readonly`, `googlehealth.health_metrics_and_measurements.readonly`. Do **not** pass `include_granted_scopes=true` (known token-rejection issue when legacy `fitness.*` scopes were previously granted).
-- **Sync strategy (hourly):**
-  - `dailyRollUp` for steps, calories, active-zone minutes, resting HR — today and yesterday (device sync lag means late-arriving data; always re-fetch a 48 h window).
-  - `reconcile` stream for heart rate at reduced resolution (5-min buckets are plenty for coaching; the raw ~5 s stream is ~8,700 points/day — store aggregates, not raw).
-  - Session reads for sleep (stages: DEEP/LIGHT/REM/AWAKE) and exercise sessions.
-  - Paginate with `pageToken`; upsert by `(data_type, start_time, source)` so re-fetches are idempotent.
-- **Resilience:** exponential backoff on 429/5xx; a missed hour self-heals because every run re-reads the trailing 48 h.
+- **OAuth (per user):** each user authorizes from their phone via `/auth/google`; the
+  refresh token is stored encrypted in SQLite (see DESIGN-V2). A signed `state`
+  parameter binds the grant to the right LINE user, and the PKCE verifier is
+  persisted between the two requests.
+- **Sync strategy (hourly):** `dailyRollUp` for steps, total calories and
+  active-zone-minutes; `list` for the daily HRV / SpO₂ / respiratory-rate /
+  resting-HR types; `list` for sleep and exercise sessions. Always re-reads the
+  trailing 48 h, because device sync lag keeps changing yesterday.
+- **Idempotency:** every row is upserted on `(user_id, day, hour, data_type, source)`,
+  so a re-read or a missed hour self-heals on the next run. Sessions that grow as the
+  tracker syncs are matched by overlap, not by exact `(start, end)`.
+- **Backfill:** a user with under 14 days of history gets a 90-day backfill once,
+  chunked to respect per-type range limits.
+- **Resilience:** exponential backoff on 429/5xx for reads; see §10 for why writes are
+  deliberately *not* retried.
 
 ### 3.2 Storage (SQLite)
 
-Single file DB — this is a personal single-user system; Postgres is overkill.
+Single file — this is a personal, small-group system; Postgres is overkill.
 
 ```sql
-metrics(day, hour, data_type, value_json, source, updated_at)      -- hourly aggregates
-sleep_sessions(start, end, stages_json, efficiency, score)
-exercise_sessions(start, end, activity_type, stats_json)
-insights(ts, kind, content, delivered)                             -- what the coach said (dedup + memory)
-goals(key, value_json, updated_at)                                 -- user goals, plan state
-chat_messages(ts, role, text)                                      -- WhatsApp conversation history
-coach_memory(name, content, updated_at)                            -- long-term facts the coach saves
+users(line_user_id, google_token_json, gemini_api_key, timezone, language, …)
+metrics(user_id, day, hour, data_type, value_json, source, updated_at)
+sleep_sessions(user_id, start, end, stages_json, efficiency, score)
+exercise_sessions(user_id, start, end, activity_type, stats_json)
+insights(user_id, ts, kind, content, delivered)   -- briefs, nudges, food_log history
+goals(user_id, key, value_json)                   -- targets, workout plan
+chat_messages(user_id, ts, role, text)
+coach_memory(user_id, name, content)
+sync_log(user_id, ts, data_type, ok, detail)
+log_messages(message_id, user_id, insight_rowid)  -- quote-reply targeting
+processed_events(message_id, user_id, created_at) -- webhook exactly-once
+failure_state(user_id, kind, count, notified)     -- "reconnect" notifications
 ```
 
-### 3.3 Coach engine (Claude)
+Retention runs daily: `sync_log` past 14 days, nudge insights past 90, chat beyond the
+newest 500 per user, expired dedup keys. `food_log` history is never pruned — weekly
+reports read it and deletes resolve against it.
 
-- **Model:** `claude-opus-4-8` ($5 / $25 per MTok) with adaptive thinking (`thinking: {type: "adaptive"}`) and `output_config: {effort: "medium"}` for summaries. If cost ever matters more than quality you can drop the hourly-nudge path to `claude-haiku-4-5` ($1 / $5) — your call; the design works with either.
+### 3.3 Coach engine (Gemini)
+
+- **Models:** `gemini-pro-latest` primary, falling back to `gemini-3.5-flash` then
+  `gemini-3.5-flash-lite`. Chosen on measured stability, not marketing — see §10.
 - **Two invocation shapes:**
-  1. **Daily summary (single call, structured input):** the service pre-computes a compact JSON snapshot (yesterday's totals, sleep breakdown, 7/30-day trends, goal progress, open plan items, weather optional) and asks for a WhatsApp-formatted coaching message. Structured output not needed — the deliverable is prose.
-  2. **Chat agent (tool runner):** `client.beta.messages.tool_runner()` with tools:
-     - `query_health_data(data_type, start, end, aggregation)` → reads SQLite
-     - `get_goals()` / `set_goal(key, value)`
-     - `save_memory(name, content)` / plus memories auto-loaded into the system prompt
-     - `create_workout_plan(...)` → persists a multi-week plan the daily loop then tracks
-- **Prompt caching:** stable system prompt (coach persona + feature definitions + memory digest) first with `cache_control: {type: "ephemeral"}`; volatile data (today's snapshot, chat history) after. The daily/hourly calls then mostly pay cache-read prices.
-- **Memory:** mirrors Google's "remembers your goals, learns from your progress" — the coach reads `coach_memory` + `goals` each call and can write back via tools. Feedback like "less cardio talk, more strength" persists.
+  1. **Scheduled narrative** — the service computes the numbers deterministically and
+     renders them as Flex stat cards; Gemini writes only the interpretation. This is
+     why the brief cannot invent a step count.
+  2. **Chat turn** — one call with health context, recent logs, goals and memory. The
+     model requests actions by emitting **directives** the service executes:
+     `[MEMORY:]`, `[SET_NUTRITION_TARGETS:]`, `[CREATE_PLAN:]`, `[LOG_FOOD:]`,
+     `[LOG_DRINK:]`, `[ADJUST_LAST:]`, `[DELETE_LAST:]`, `[DELETE_TODAY:]`.
+- **The model never reports its own success.** The service appends the real outcome of
+  every directive. Both prompts state this explicitly, because a confident "saved it"
+  over a failed write is worse than no reply — see §10.
+- **Safety net:** when a message plainly asks to record something and no log directive
+  came back, a second single-purpose extractor call re-reads the message for just the
+  payload. Prompt adherence is not reliable enough to be the only path.
+- **Memory:** `coach_memory` + `goals` are loaded into every call and written back via
+  directives, mirroring Google's "remembers your goals".
 
 ### 3.4 Feature parity map (vs. Google Health Premium Coach)
 
 | Google Health Coach feature | Our implementation |
 |---|---|
-| Proactive daily insights & nudges | Daily 10:00 am summary + hourly rule-triggered nudges (inactivity streak, unusually high resting HR, bedtime reminder if sleep debt) |
-| Readiness / recovery analysis | Computed from resting HR trend + sleep score + yesterday's load; explained by the coach in the daily message |
-| Sleep consistency & restorative-rest goals | Weekly consistency tracking (bed/wake time variance, deep+REM share vs. 7-day baseline) |
-| Tailored workouts & adaptive multi-week plans | `create_workout_plan` tool; daily loop checks plan adherence and the coach adjusts on feedback |
-| 24/7 conversational coach with memory | WhatsApp two-way chat loop + `coach_memory` |
-| Cycle / nutrition insights | Phase 3 — needs data types landing in the Health API Q3 2026 |
-| Medical-record summaries | Out of scope (no personal API for FHIR records; and worth keeping PHI out of this pipeline) |
+| Proactive daily insights & nudges | Daily brief at 10:00 local + hourly rule-triggered nudges (low steps, step streak, elevated resting HR, bedtime) |
+| Readiness / recovery analysis | `stats._readiness` combines resting-HR, HRV and sleep against a 30-day baseline, with SpO₂ / respiratory-rate anomaly checks; shown as a verdict pill on the brief |
+| Sleep consistency & restorative rest | Sleep stages, asleep-vs-in-bed split, week/month averages and week-over-week trend |
+| Tailored workouts & adaptive plans | `[CREATE_PLAN:]` builds a multi-week plan; the current week is derived from the clock and referenced in the daily brief |
+| 24/7 conversational coach with memory | LINE two-way chat + `coach_memory` |
+| Nutrition insights | Food and drink logging from a photo or a sentence, written to Google Health, with daily targets and a progress card |
+| Cycle insights | Not implemented |
+| Medical-record summaries | Out of scope — deliberately keeping PHI out of this pipeline |
 
-**Nudge design rule:** rules (cheap code) decide *when* to speak; Claude decides *what to say*. This keeps hourly costs near zero and prevents spam. Hard cap: ≤ 3 nudges/day, quiet hours 22:00–07:00.
+**Nudge design rule:** rules (cheap code) decide *when* to speak; Gemini decides *what
+to say*. Hard cap ≤ 3 nudges/day, quiet hours 22:00–07:00 in the user's local time.
 
-### 3.5 WhatsApp delivery
+### 3.5 LINE delivery
 
-- **Setup:** Meta developer account → Business app → WhatsApp product → use the free test number (or register a dedicated number) → add your personal number as recipient → permanent system-user token.
-- **Outbound:**
-  - Inside an open 24 h service window (i.e., you messaged the coach within the last day): free-form text messages, free.
-  - Window closed (you haven't chatted in >24 h): send a pre-approved **utility template** (`daily_health_summary` with body variables). At 1–2 messages/day this stays within free/near-zero cost and far under the 250/day unverified cap.
-  - Practical trick: the daily summary ends with a question ("Reply 1 for today's workout"). Any reply re-opens the free window for the whole next day.
-- **Inbound webhook:** HTTPS endpoint (Cloud Run URL, or Cloudflare Tunnel / Tailscale Funnel if self-hosting) verified with Meta; validates `X-Hub-Signature-256`; enqueues message → chat agent → reply via `/messages`.
-- **Formatting:** WhatsApp supports `*bold*`, `_italic_`, emoji, and lists — the coach prompt specifies this style and a ~900-character target for summaries.
+- **Outbound:** replies use the webhook's reply token (free, unlimited) and fall back
+  to a push when the token has expired. Scheduled briefs are pushes.
+- **Flex Messages** carry the visual work: daily/weekly report cards with trend chips
+  and a sleep-stage bar, food/drink log cards with the photo as hero image, and a
+  daily nutrition progress card. Plain text is the fallback.
+- **Inbound:** `POST /webhook`, HMAC-verified with the channel secret, processed in a
+  background task so LINE gets its 200 immediately. Each message id is claimed exactly
+  once (`processed_events`) because LINE can deliver the same event twice.
+- **Formatting:** LINE has no markdown. Prompts specify emoji section markers and
+  `「」` for numbers.
 
-### 3.6 Scheduling & deployment — local machine (Mac mini), Docker
+### 3.6 Scheduling & deployment — Mac mini, Docker
 
-Runs on a Mac mini (or any always-on box), packaged as Linux containers via Docker so the same setup moves unchanged to Windows (Docker Desktop + WSL2) or Linux later.
+Three containers via `docker compose`, all Linux, so the setup moves unchanged to
+Windows or Linux:
 
-**Two containers via `docker compose`:**
+| Service | Role |
+|---|---|
+| `coach` | FastAPI webhook + APScheduler, port bound to `127.0.0.1` only |
+| `tunnel` | Cloudflare Tunnel giving the webhook a stable HTTPS URL with no open ports |
+| `watchdog` | Polls `coach`'s `/healthz` and cloudflared's `/ready`, restarts either via the Docker API after 3 consecutive failures, and reports over LINE |
 
-```yaml
-services:
-  coach:
-    build: .
-    restart: unless-stopped
-    env_file: .env                 # ANTHROPIC_API_KEY, META_WA_TOKEN, phone IDs
-    volumes:
-      - ./data:/app/data           # SQLite DB + Google OAuth tokens persist here
-    ports:
-      - "127.0.0.1:8080:8080"      # webhook, only exposed to localhost
-
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-    depends_on: [coach]
-```
+| Job | When |
+|---|---|
+| Health sync | hourly at :05 |
+| Nudge check | hourly at :35 |
+| Daily brief | hourly dispatch, fires at 10:00 in each user's local time |
+| Weekly report | hourly dispatch, fires Sunday 09:00 local |
+| Temp image prune | hourly at :50 |
+| DB retention prune | daily at 04:20 |
 
 Design decisions that make this portable:
 
-- **Scheduler lives inside the app process** (APScheduler in the FastAPI service), not in host cron/launchd — so there is zero OS-specific scheduling config. One container = webhook server + hourly/daily jobs.
-- **Webhook exposure:** Meta requires a public HTTPS endpoint. A free **Cloudflare Tunnel** (`coach.yourdomain.com` → `coach:8080`) provides a stable URL with TLS, no open router ports, works identically on macOS and Windows. (Tailscale Funnel is a fine alternative if you prefer.)
-- **State in one bind-mounted folder** (`./data`): SQLite DB + Google refresh token. Migration to another machine = copy the repo folder + `data/` + `.env`, run `docker compose up -d`.
-- **Secrets in `.env`** (git-ignored), injected as container env vars — portable, unlike macOS Keychain or Windows Credential Manager.
-- **One-time Google OAuth:** run the auth flow on the host once (`docker compose run coach python -m coach.auth` opens a browser URL, paste the code); the refresh token lands in `data/` and renews itself from then on.
-
-**Mac mini host setup (once):**
-- Docker Desktop (or the lighter OrbStack/Colima) set to start at login; `restart: unless-stopped` brings the containers back after reboots.
-- Prevent sleep: System Settings → Energy → *Prevent automatic sleeping when the display is off*, or `sudo pmset -a sleep 0`. A sleeping Mac mini means missed syncs and a dead webhook.
-- (Windows equivalent later: Docker Desktop autostart + disable sleep in Power settings — nothing else changes.)
-
-**Downtime tolerance:** the hourly sync always re-reads the trailing 48 h, so an outage self-heals on the next run; the daily summary job fires on the next scheduler tick after startup if it was missed. Inbound WhatsApp messages during downtime are retried by Meta's webhook delivery for a period, but a long outage can drop chat messages — acceptable for a personal system.
+- **Scheduler inside the app process** (APScheduler), not host cron/launchd — zero
+  OS-specific config. `misfire_grace_time` lets a job that missed its slot still fire.
+- **Per-user timezones.** The daily and weekly senders are hourly *dispatchers* that
+  check each user's local clock, and every window in `stats.py` is measured against
+  the user's day, not the server's.
+- **State in one bind-mounted folder** (`./data`): SQLite DB and temp images. Migrating
+  machines is copy the repo + `data/` + `.env`, then `docker compose up -d`.
+- **Secrets in `.env`** (git-ignored), injected as env vars. Per-user Google tokens and
+  Gemini keys are Fernet-encrypted in the DB.
+- **Downtime tolerance:** the hourly sync always re-reads 48 h, so an outage self-heals.
+  LINE retries inbound messages for a period; the dedup table makes those retries safe.
 
 ---
 
 ## 4. Message examples
 
-**Daily summary (10:00 am, template or free-form):**
+**Daily brief (10:00 local)** — a Flex card: a readiness pill, itemized recovery /
+sleep / activity rows with ▲▼ trend chips against the 7-day average, a proportional
+sleep-stage bar, and one short Gemini-written "Today's Focus" paragraph. The numbers
+are rendered from the database; only the prose comes from the model.
 
-> 🌅 *Morning, Metis — here's your health brief*
->
-> *Sleep:* 7 h 12 m (💤 score 82) — deep sleep up 18% vs. your weekly average. Bedtime consistency is your win this week: 4 nights within 30 min.
->
-> *Recovery:* Resting HR 58 (baseline 60) → you're well recovered. Good day for your Week-2 strength session.
->
-> *Yesterday:* 9,340 steps, 46 active-zone minutes ✅ goal met 5 days straight.
->
-> *Today's focus:* 40-min upper-body strength + keep the streak alive.
->
-> Reply *1* for the workout details, or just tell me how you're feeling.
+**Food log** — photo or sentence in, a Flex card back: item name, the headline stat,
+macro rows, and a one-line coaching tip grounded in today's real totals versus target,
+swipeable to a progress card.
 
-**Hourly nudge (rule-triggered):**
+**Nudge (rule-triggered):**
 
-> 🚶 You've been still for 2.5 hours and you're 3,800 steps from goal with 5 hours of daylight left. A 15-minute walk now keeps the 6-day streak alive.
+> 🚶 It's 15:35 and you've only logged 1,200 steps today. You average 9,454 steps a day
+> over the past month — a 15-minute walk now would close most of the gap.
 
 ---
 
@@ -193,47 +221,152 @@ Design decisions that make this portable:
 
 | Item | Volume | Est. monthly cost |
 |---|---|---|
-| Google Health API | hourly sync | Free |
-| Claude Opus 4.8 — daily summary | 30 calls × ~6K in (mostly cached) / 700 out | ~$1.20 |
-| Claude Opus 4.8 — nudges | ~45 calls × ~2K in / 150 out | ~$0.70 |
-| Claude Opus 4.8 — chat | ~150 turns × ~4K in (cached) / 300 out | ~$2.50 |
-| WhatsApp Cloud API | 1–2 utility templates/day, service msgs free | ~$0–1 |
-| Hosting (Mac mini you already own, Docker + Cloudflare Tunnel free tier) | always-on | $0 (+ a few $ of electricity) |
-| **Total** | | **≈ $5/month** (vs. $9.99 for Google Health Premium — and this coach texts you on WhatsApp) |
+| Google Health API | hourly sync + writes | Free |
+| Gemini | ~15–30 calls/day on the user's own key | On the user (free tier has covered it so far) |
+| LINE Messaging API | replies free; pushes ~2–5/day | Free (500 pushes/month) |
+| Hosting | Mac mini you already own + Cloudflare Tunnel free tier | ~$0 + electricity |
 
-Swapping nudges + chat to Haiku 4.5 would bring it to ≈ $2/month, at reduced coaching quality.
+Each user brings their own Gemini key, so AI cost scales per person and never lands on
+the operator.
 
 ---
 
 ## 6. Security & privacy
 
-- Health data is sensitive: OAuth app stays in Testing mode (only your account can grant access); secrets live in a git-ignored `.env` and the `data/` folder, never committed.
-- The webhook port binds to `127.0.0.1` only — the sole public entry point is the Cloudflare Tunnel, so nothing on your LAN/router is exposed.
-- Webhook hardening: verify Meta's HMAC signature (`X-Hub-Signature-256`) on every inbound request; process messages **only from your own phone number** (drop everything else).
-- Claude API requests are covered by Anthropic's standard 30-day retention; no medical records ever enter the pipeline (deliberately out of scope).
-- SQLite DB never leaves your machine. Consider Time Machine (or any backup) covering `data/` — it's the only stateful thing.
+- Health data is sensitive: the OAuth app stays in **Testing** mode, so only accounts
+  added as test users can grant access. Secrets live in a git-ignored `.env`; `data/`
+  is never committed.
+- Per-user Google tokens and Gemini keys are **Fernet-encrypted** at rest with a
+  server-side `ENCRYPTION_KEY`.
+- The webhook port binds to `127.0.0.1`; the only public entry point is the Cloudflare
+  Tunnel, so nothing on the LAN or router is exposed.
+- Every inbound request is HMAC-verified (`X-Line-Signature`). The local `/chat`
+  endpoint is reachable through the tunnel, so it is disabled unless `CHAT_TEST_TOKEN`
+  is set and presented, and answers 404 otherwise.
+- **Every query is scoped by `user_id`.** No endpoint exposes another user's data.
+- Temp photos are served under an unguessable token, only for paths this process
+  minted, and pruned after 24 h.
+- No medical records enter the pipeline — deliberately out of scope.
 
 ---
 
-## 7. Implementation plan
+## 7. Implementation status
 
-| Phase | Deliverable | Scope |
+| Phase | Deliverable | State |
 |---|---|---|
-| **1. Pipes** | Data flowing end to end | Google OAuth flow + hourly sync into SQLite; WhatsApp sandbox sending "hello" to your phone |
-| **2. Daily coach** | The core feature | Snapshot builder → Claude daily summary → 10:00 am WhatsApp delivery; `daily_health_summary` template approved |
-| **3. Nudges** | Proactive coaching | Rule engine (inactivity, recovery, bedtime, streaks) + nudge generation + rate limiting |
-| **4. Chat** | Two-way coach | Webhook receiver, tool-runner agent with health-query/goal/memory tools, conversation history |
-| **5. Plans & trends** | Premium parity | Multi-week adaptive workout plans, weekly report (Sunday), sleep-consistency program; cycle/nutrition when API data types land (Q3 2026) |
+| 1. Pipes | OAuth + hourly sync into SQLite; LINE sending | Done |
+| 2. Daily coach | Snapshot → Gemini narrative → Flex brief at 10:00 local | Done |
+| 3. Nudges | Rule engine + rate limiting + quiet hours | Done |
+| 4. Chat | Webhook, directive-driven agent, conversation memory | Done |
+| 5. Plans & trends | Multi-week plans, weekly report, readiness scoring | Done |
+| 6. Multi-user | Per-user tokens/keys, encryption, web OAuth | Done — see DESIGN-V2 |
+| 7. Nutrition | Photo and text food/drink logging written to Google Health | Done |
 
-Suggested stack: **Python 3.12**, `google-auth` + `requests` for Health API, `anthropic` SDK, `FastAPI` for the webhook, `APScheduler` for in-process cron, `sqlite3` — one app container + one Cloudflare Tunnel container via `docker compose`, running on the Mac mini.
+Stack: **Python 3.12**, `google-genai`, `google-auth` + `requests` for the Health API,
+`FastAPI`, `APScheduler`, `sqlite3`, `Pillow`, `line-bot-sdk`. Dependencies are pinned
+exactly (see `requirements.txt`) so a rebuild deploys what was tested.
+
+Tests: `tests/` runs offline on a throwaway database (`python -m unittest discover`);
+`tests/manual/` holds checks that need live APIs.
 
 ---
 
 ## 8. Sources
 
 - [Google Fit deprecation & migration FAQ](https://developer.android.com/health-and-fitness/health-connect/migration/fit/faq) · [Google Fit REST API](https://developers.google.com/fit/rest)
-- [About the Google Health API](https://developers.google.com/health/about) · [Release notes](https://developers.google.com/health/release-notes)
-- [Terra: How the new Google Health API works](https://tryterra.co/blog/everything-you-need-to-know-about-google-health-new-api)
-- [Google blog: Google Health Coach now available to Premium users](https://blog.google/products-and-platforms/products/google-health/google-health-coach/) · [9to5Google: Google Health app replaces Fitbit](https://9to5google.com/2026/05/07/google-health-app-fitbit/) · [MobiHealthNews: Gemini-powered AI health coach](https://www.mobihealthnews.com/news/google-debuts-gemini-powered-ai-health-coach-fitbit-and-pixel-watch-users)
-- [WhatsApp Cloud API — Get started](https://developers.facebook.com/documentation/business-messaging/whatsapp/get-started) · [Pricing](https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing) · [Chatarmin setup & cost guide 2026](https://chatarmin.com/en/blog/whatsapp-cloudapi)
-- [Fitbit Web API reference (legacy, sunset Sep 2026)](https://dev.fitbit.com/build/reference/web-api/)
+- [About the Google Health API](https://developers.google.com/health/about) · [Release notes](https://developers.google.com/health/release-notes) · [Error catalog](https://developers.google.com/health/reference/rest/v4/errors) · [Scopes](https://developers.google.com/health/scopes)
+- [Google blog: Google Health Coach for Premium users](https://blog.google/products-and-platforms/products/google-health/google-health-coach/) · [9to5Google: Google Health app replaces Fitbit](https://9to5google.com/2026/05/07/google-health-app-fitbit/)
+- [LINE Messaging API](https://developers.line.biz/en/docs/messaging-api/) · [Flex Messages](https://developers.line.biz/en/docs/messaging-api/using-flex-messages/)
+- [Gemini API changelog](https://ai.google.dev/gemini-api/docs/changelog) · [Gemini deprecations](https://ai.google.dev/gemini-api/docs/deprecations)
+
+---
+
+## 9. Changed since the original design
+
+The 2026-07-14 design specified **Claude** as the AI engine and **WhatsApp** as the
+channel. Both were replaced before the first release, and this document described a
+system that never existed for about six weeks. What actually happened:
+
+| Original | Built | Why |
+|---|---|---|
+| Claude Opus 4.8 | Gemini (`gemini-pro-latest`) | Each user brings their own API key, and a free Gemini tier covers a personal coach. The Google Health data and the model then sit behind the same Google account. |
+| WhatsApp Cloud API | LINE Messaging API | The users are in Thailand, where LINE is the default messenger. LINE also has no 24-hour service window to manage, and Flex Messages allow real card layouts — the daily brief and food log cards depend on that. |
+| Anthropic tool-runner agent | Directives in the reply text | Simpler to run against a plain `generateContent` call, and the service stays the only thing that touches the database or Google Health. |
+| Single user, token in a file | Per-user tokens encrypted in SQLite | See DESIGN-V2. |
+
+The cost picture changed with it: the original estimate was ~$5/month of Anthropic API
+on the operator's key. Now AI cost sits on each user's own key and the operator pays
+for electricity.
+
+---
+
+## 10. Operational facts learned the hard way
+
+Behaviour that is not in the docs, or that the docs state and we only believed after
+being bitten. Each one is enforced in code and covered by a test.
+
+**Google Health API**
+
+- **A client can only delete data points it wrote.** `dataPoints:batchDelete` answers
+  `403 PERMISSION_DENIED` / `DATA_POINT_NOT_OWNED_BY_CLIENT`, and it rejects the
+  **whole request** if one foreign name is in the list — so "delete all of today"
+  removed nothing at all while another app had entries on the same day. Filter to our
+  own points before asking. Neither the API reference nor the Health Connect docs state
+  this; only the error does.
+- **`batchDelete` accepts at most 10,000 names per request**, and an oversized call
+  fails entirely. Chunked at 500.
+- **A 200 is not proof.** After deleting, re-read and confirm. Reporting the number of
+  names *attempted* told users "cleared 12 meals" when nothing had gone away.
+- **Writes must not be retried on 5xx.** A `create` that the server applied but failed
+  to acknowledge becomes a duplicate entry on retry. 429 is still retried — that
+  response means the request was rejected outright.
+- **`list` allows `pageSize` up to 10,000 — except `sleep` and `exercise`, capped at
+  25.** Larger values are silently clamped today, which is not something to rely on.
+- **Filter fields differ per data type.** `sleep` accepts
+  `sleep.interval.civil_end_time`; `exercise` only accepts `civil_start_time`.
+- **The totals aggregate every app on the device.** A Health Connect bridge
+  (`nl.appyhapps.healthsync`) mirrored this account's meals back in 19,673 times and
+  the progress card read 820,981 kcal against a 3,200 target. Google Health is now
+  cross-checked against our own logged history: an absurd multiple of the user's target
+  is rejected, a milder mismatch is logged, and each metric takes the higher of the two
+  so an external deletion cannot make the card under-report.
+- **Uninstalling the offending app does not remove what it wrote**, and neither the
+  Google Health app nor Health Connect could bulk-delete it. Assume foreign data is
+  permanent and defend the *reading* path.
+
+**Gemini**
+
+- **`google-genai` applies no request timeout.** One `generateContent` call hung for
+  30 m 32 s before answering 502; the reply arrived long after the LINE reply token had
+  died, and looked to the user like the message was ignored. Requests now carry an
+  explicit 120 s bound.
+- **The SDK retries 5 times by default against the same model.** That competes with —
+  and delays — our own rotation, which moves to a different capacity tier, parks a model
+  whose daily quota is spent, and honours a server `retryDelay`. Disabled
+  (`attempts=1`).
+- **Thinking tokens share `max_output_tokens`.** At 2,103 tokens for HIGH they will
+  truncate the reply, and for a chat turn that means silently losing the trailing
+  `[LOG_FOOD]` directive. All calls now budget 4,096.
+- **`thinking_level: MINIMAL` is rejected** (`400 INVALID_ARGUMENT`) as of 2026-08-23.
+  `MEDIUM` and `HIGH` answer 503 on the flash tiers. `LOW` is the highest level
+  universally available.
+- **The `*-latest` aliases are the least stable thing in the account.** Measured with 5
+  identical calls per model, `gemini-flash-latest` was the only failure (3/5:
+  ConnectError + 503) while every pinned model answered 5/5. An alias tracks the newest
+  release and rides the least settled capacity.
+- **Prompt adherence is not a guarantee.** The model will answer a log request with a
+  fluent "บันทึกแล้ว" and no directive, so nothing is saved while the user is told it
+  was. Anything that must happen needs a deterministic path, not just an instruction.
+- **The model's own history is a prompt.** Successful logs used to store an empty coach
+  turn and failed ones stored the prose claim; read back as few-shot examples, that
+  taught the model to stop emitting directives. What the coach actually *did* is now
+  recorded in the turn.
+
+**LINE**
+
+- **The same event can arrive twice without the `isRedelivery` flag**, which logged one
+  meal as two. Message ids are claimed exactly once.
+- **Reply tokens are short-lived and single-use.** Any slow path must fall back to a
+  push, and those count against the monthly quota.
+- **Delivered photos are already downscaled** (≤ ~1.64 MP, ~250 KB observed), so the
+  "phone photos are 2–4 MB" premise for compressing them did not hold here.

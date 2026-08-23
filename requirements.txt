@@ -23,5 +23,8 @@ google-auth-oauthlib==1.4.0
 # — see coach/gemini.py. Verify those still exist when bumping.
 google-genai==2.19.0
 line-bot-sdk==3.25.0
+# Only used to bound image size before upload (coach/images.py). Photo logging
+# degrades gracefully to the original bytes if it is ever missing.
+pillow==11.3.0
 cryptography==50.0.0
 docker==7.2.0
