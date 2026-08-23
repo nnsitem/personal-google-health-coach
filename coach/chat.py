@@ -102,6 +102,8 @@ Special abilities (use these directives on their own line at the END of your rep
     User: "ไอติม soft serve นม ร้าน mos burder 1 โคน"
     → food_name_en = "Milk Soft Serve Ice Cream, Mos Burger (1 cone)"
     → food_name_local = "ไอศกรีมซอฟต์เสิร์ฟรสนม Mos Burger (1 โคน)"
+    Always START WITH A CAPITAL LETTER and use Title Case — "Aburi Salmon Sushi",
+    not "aburi salmon sushi"; "Iced Green Tea", not "iced green tea".
     These names are shown as the card title and logged to Google Health, so make
     them look polished and readable in both languages.
   - Anything DRINKABLE goes in LOG_DRINK, even when it is thick or a meal in

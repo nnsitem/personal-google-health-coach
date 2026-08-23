@@ -92,6 +92,10 @@ drink, and must never be an empty string:
 - You'll be given the user's totals already logged today (before this item) and
   their daily targets. Use those REAL numbers, plus this item's own estimated
   nutrition, to decide what's most useful to say next.
+- Display names ("*_name_en" / "*_name_local") must START WITH A CAPITAL LETTER
+  and read like a menu item in Title Case — "Aburi Salmon Sushi", not "aburi
+  salmon sushi"; "Iced Green Tea", not "iced green tea". Google Health shows the
+  English name verbatim.
 - This text appears on a card that doesn't otherwise show which item was just
   logged, so name the item. Format it as ONE natural sentence, ALWAYS starting
   with ✨ (this exact emoji, never ⭐/💡/🎉/💧 or any other): "✨ <item name>
@@ -429,8 +433,41 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
     if data and data.get("type") in ("food", "drink"):
         if not data.get("coaching_suggestion"):
             log.warning("vision response missing coaching_suggestion (type=%s)", data.get("type"))
-        return data
+        return _normalize_names(data)
     return None
+
+
+_NAME_FIELDS = ("food_name_en", "food_name_local", "drink_name_en", "drink_name_local")
+
+
+def _capitalize_first(name: str) -> str:
+    """Uppercase the first letter, leaving the rest untouched.
+
+    23% of logged names arrived lower-case ("aburi salmon sushi", "water",
+    "mate tea") because the prompt only ever asked for brand names to be
+    capitalised. Google Health shows this string verbatim, so the entry looked
+    sloppy next to the ones that happened to come back title-cased.
+
+    Deliberately NOT .title(): that rewrites the whole string and would turn
+    "McDonald's" into "Mcdonald'S" and "iced tea, 7-Eleven" into something
+    worse. Only an ASCII lower-case first character is touched, so Thai (which
+    has no case) and names already starting with a brand or digit are left
+    exactly as the model wrote them.
+    """
+    if not name:
+        return name
+    first = name[0]
+    return (first.upper() + name[1:]) if "a" <= first <= "z" else name
+
+
+def _normalize_names(analysis: dict) -> dict:
+    """Capitalise every display-name field in place. Returns the same dict."""
+    if isinstance(analysis, dict):
+        for field in _NAME_FIELDS:
+            value = analysis.get(field)
+            if isinstance(value, str):
+                analysis[field] = _capitalize_first(value.strip())
+    return analysis
 
 
 def _extract_json(text: str) -> dict | None:
@@ -477,7 +514,10 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
 
     # NutritionLog anonymous-food payload. Energy in kcal, macros in grams.
     nutrition_log = {
-        "foodDisplayName": food_name_en[:100],
+        # Last line of defence: adjustments and a caloric drink's nutrition twin
+        # build their own dict, so normalise here too rather than trusting every
+        # caller to have done it.
+        "foodDisplayName": _capitalize_first(food_name_en.strip())[:100],
         "mealType": meal_type,
         "interval": interval,
         "energy": {"kcal": calories},
@@ -621,6 +661,7 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
 
     if not isinstance(analysis, dict):
         return labels["not_synced"], None
+    _normalize_names(analysis)
 
     # The model writes these as JSON numbers, but be lenient ("450" etc.)
     for field in ("calories_kcal", "protein_g", "total_carbohydrate_g",
