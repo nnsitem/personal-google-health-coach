@@ -34,7 +34,7 @@ class SeriesFiltering(unittest.TestCase):
         today = datetime.now(TZ).date().isoformat()
         db.upsert_metric(uid, today, None, "steps",
                          {"steps": {"countSum": 820981}}, source="test")
-        series = stats._load_daily_series(uid, 7)
+        series = stats._load_daily_series(uid, 7, TZ)
         self.assertNotIn(today, series["steps"])
 
     def test_plausible_days_are_kept(self):
@@ -42,7 +42,7 @@ class SeriesFiltering(unittest.TestCase):
         today = datetime.now(TZ).date().isoformat()
         db.upsert_metric(uid, today, None, "steps",
                          {"steps": {"countSum": 9454}}, source="test")
-        series = stats._load_daily_series(uid, 7)
+        series = stats._load_daily_series(uid, 7, TZ)
         self.assertEqual(series["steps"][today], 9454)
 
 

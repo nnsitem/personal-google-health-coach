@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 from coach import db
 from coach import gemini
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY
 from coach.plans import create_workout_plan, get_current_plan
 
 log = logging.getLogger(__name__)
@@ -154,8 +154,9 @@ Special abilities (use these directives on their own line at the END of your rep
 # ---------------------------------------------------------------------------
 
 def _get_recent_metrics(user_id: str, days: int = 7) -> dict:
-    """Get the last N days of health metrics."""
-    cutoff = (datetime.now(TZ).date() - timedelta(days=days)).isoformat()
+    """Get the last N days of health metrics (the USER's days, not the server's)."""
+    cutoff = (datetime.now(db.user_tz(db.get_user(user_id))).date()
+              - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT day, data_type, value_json FROM metrics WHERE user_id = ? AND day >= ? ORDER BY day DESC",
@@ -187,8 +188,9 @@ def _get_recent_metrics(user_id: str, days: int = 7) -> dict:
 
 
 def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
-    """Get recent sleep sessions summarized."""
-    cutoff = (datetime.now(TZ) - timedelta(days=days)).isoformat()
+    """Get recent sleep sessions summarized, in the user's local time."""
+    tz = db.user_tz(db.get_user(user_id))
+    cutoff = (datetime.now(tz) - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT start, end, stages_json, efficiency, score FROM sleep_sessions WHERE user_id = ? AND start >= ? ORDER BY start DESC",
@@ -211,8 +213,8 @@ def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
 
         in_bed_min = sum(totals.values())
         asleep_min = in_bed_min - totals["AWAKE"]
-        start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(TZ)
-        end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(TZ)
+        start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(tz)
+        end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(tz)
 
         sessions.append({
             "date": start_local.strftime("%Y-%m-%d"),
@@ -387,11 +389,14 @@ def _build_context_message(user_id: str) -> str:
     """Build a context block with current + historical health data for the agent."""
     from coach.stats import build_trends
 
-    now = datetime.now(TZ)
+    tz = db.user_tz(db.get_user(user_id))
+    now = datetime.now(tz)
     goals = _get_goals(user_id)
     memory = _get_coach_memory(user_id)
 
-    parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({TZ})"]
+    # The model reasons about "today" from this line; the server's clock is not
+    # the user's once anyone signs up outside the server's timezone.
+    parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({tz})"]
 
     # Multi-window summary: today, yesterday, weekly & monthly averages, trends.
     # This lets the coach reason about patterns, not just today's snapshot.

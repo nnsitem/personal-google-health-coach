@@ -1,12 +1,27 @@
-fastapi==0.116.*
-uvicorn[standard]==0.35.*
-apscheduler==3.11.*
-requests==2.32.*
-python-dotenv==1.1.*
+# Exact pins so a rebuild deploys the code that was tested, not whatever the
+# index happens to serve that day. A `docker compose build --no-cache` on
+# 2026-08-23 silently moved google-genai 2.18.1 -> 2.19.0 because the line read
+# `>=1.0`; nothing broke, but the SDK owns the request timeout and thinking
+# config this app depends on, and finding that out from production is the wrong
+# way round.
+#
+# To upgrade deliberately:
+#   docker compose run --rm coach pip list --outdated
+#   # bump the line, rebuild, then run the suite before deploying:
+#   docker compose run --rm -v "$PWD/coach:/app/coach" -v "$PWD/tests:/app/tests" \
+#       coach python -m unittest discover -s tests -t .
+
+fastapi==0.116.2
+uvicorn[standard]==0.35.0
+apscheduler==3.11.3
+requests==2.32.5
+python-dotenv==1.1.1
 # google-auth >=2.48.1 required by google-genai; oauthlib 1.2.4+ dropped its <2.42 cap
-google-auth>=2.48.1
-google-auth-oauthlib>=1.2.4
-google-genai>=1.0
-line-bot-sdk>=3.0
-cryptography>=42.0
-docker>=7.0
+google-auth==2.56.3
+google-auth-oauthlib==1.4.0
+# Owns HttpOptions(timeout=..., retry_options=...) and ThinkingConfig(thinking_level=...)
+# — see coach/gemini.py. Verify those still exist when bumping.
+google-genai==2.19.0
+line-bot-sdk==3.25.0
+cryptography==50.0.0
+docker==7.2.0

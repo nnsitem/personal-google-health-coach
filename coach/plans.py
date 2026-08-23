@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from coach import db
 from coach import gemini
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY
 
 log = logging.getLogger(__name__)
 
@@ -106,8 +106,13 @@ def _extract_json(text: str) -> dict | None:
 
 
 def save_plan(user_id: str, plan: dict) -> None:
-    """Save a workout plan to the goals table."""
-    plan["created"] = datetime.now(TZ).isoformat()
+    """Save a workout plan to the goals table.
+
+    `created` is stamped in the USER's timezone: _elapsed_progress() derives the
+    current week from it, so a server-clock stamp would shift the week boundary
+    for anyone living elsewhere.
+    """
+    plan["created"] = datetime.now(db.user_tz(db.get_user(user_id))).isoformat()
     plan["week"] = 1
     plan["completed_days"] = []
 
