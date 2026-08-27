@@ -167,7 +167,7 @@ def generate_weekly_report(user_id: str, snapshot: dict | None = None) -> str:
 
     text = gemini.generate(
         api_key, contents=user_message, system_instruction=WEEKLY_SYSTEM_PROMPT,
-        max_output_tokens=1536, min_chars=40,
+        max_output_tokens=4096, min_chars=40,
     )
 
     with db.connect() as conn:

@@ -23,12 +23,68 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_TTL_HOURS = 24
 _EXT_BY_MIME = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
 
+# Longest edge for the copy sent to Gemini. Deliberately generous: measured
+# 2026-08-23, the model still read both packaging labels exactly right
+# (186 kcal / 40g protein, and 330 kcal) all the way down to 768px — but two
+# photos are not enough evidence to risk a dense fine-print nutrition table for
+# a saving that is meaningless at ~15-30 calls a day. This is a BOUND for
+# pathological input (a full-resolution photo through the CLI path), not an
+# optimisation: LINE already delivers at most ~1.64 MP, so 1108x1477 passes
+# through untouched and the tallest observed photo (960x1706) is trimmed 8% to
+# 882x1568.
+VISION_MAX_EDGE = 1568
+
+# The hero copy is displayed small inside a LINE Flex card and fetched by LINE's
+# servers over the public tunnel, so there is nothing to lose by shrinking it.
+HERO_MAX_EDGE = 1024
+JPEG_QUALITY = 88
+
+
+def downscale(image_bytes: bytes, max_edge: int, mime_type: str = "image/jpeg") -> bytes:
+    """Shrink so the longest edge is at most `max_edge`. Never upscales.
+
+    Returns the ORIGINAL bytes when the image already fits, when the format
+    isn't raster-resizable, or when anything at all goes wrong — a photo that
+    can't be resized must still be logged.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        log.warning("Pillow unavailable — sending image at original size")
+        return image_bytes
+
+    try:
+        import io
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            if max(im.size) <= max_edge:
+                return image_bytes
+            before = im.size
+            im = im.convert("RGB")
+            im.thumbnail((max_edge, max_edge), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=JPEG_QUALITY, optimize=True)
+        out = buf.getvalue()
+        if len(out) >= len(image_bytes):
+            return image_bytes   # re-encoding made it bigger; keep the original
+        log.info("downscaled image %dx%d -> %dx%d (%d KB -> %d KB)",
+                 before[0], before[1], im.size[0], im.size[1],
+                 len(image_bytes) // 1024, len(out) // 1024)
+        return out
+    except Exception:
+        log.warning("could not downscale image — sending original", exc_info=True)
+        return image_bytes
+
 
 def save_temp_image(image_bytes: bytes, mime_type: str) -> str:
-    """Persist image bytes under a random token. Returns the token."""
+    """Persist image bytes under a random token. Returns the token.
+
+    Stored at HERO_MAX_EDGE: the card shows it small, LINE fetches it over the
+    tunnel, and the file sits on disk until the hourly prune.
+    """
     token = secrets.token_urlsafe(16)
-    ext = _EXT_BY_MIME.get(mime_type, "jpg")
-    (IMAGE_DIR / f"{token}.{ext}").write_bytes(image_bytes)
+    hero = downscale(image_bytes, HERO_MAX_EDGE, mime_type)
+    ext = "jpg" if hero is not image_bytes else _EXT_BY_MIME.get(mime_type, "jpg")
+    (IMAGE_DIR / f"{token}.{ext}").write_bytes(hero)
     return token
 
 

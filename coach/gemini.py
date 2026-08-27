@@ -36,12 +36,18 @@ from zoneinfo import ZoneInfo
 
 from google import genai
 
-from coach.config import GEMINI_MODEL, GEMINI_FALLBACK_MODELS, GEMINI_MAX_WAIT_SECONDS
+from coach.config import (GEMINI_MODEL, GEMINI_FALLBACK_MODELS, GEMINI_ACCURACY_MODEL,
+                          GEMINI_MAX_WAIT_SECONDS, GEMINI_REQUEST_TIMEOUT_SECONDS,
+                          GEMINI_THINKING_LEVEL)
 
 log = logging.getLogger(__name__)
 
 # Errors that are transient — worth retrying after a cooldown.
-_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL")
+# "timeout"/"timed out" included so a model that stalls gets a cooldown like any
+# other transient fault, instead of being retried straight into another stall.
+_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500",
+                      "INTERNAL", "502", "Bad Gateway", "504", "DEADLINE_EXCEEDED",
+                      "Deadline", "timeout", "timed out", "Timeout", "ReadTimeout")
 # Errors meaning "this model won't work for this key" — drop from rotation.
 _SKIP_MARKERS = ("404", "NOT_FOUND", "PERMISSION_DENIED")
 
@@ -61,7 +67,10 @@ _cooldown_until: dict[tuple[str, str], float] = {}
 # rejects MINIMAL but accepts LOW), so each model climbs this ladder on a
 # config-rejection 400 and the winning rung is cached for the process lifetime —
 # without the cache the bad config would be re-sent on every retry round.
-_THINKING_LADDER = ("MINIMAL", "LOW", None)  # None = model's default (dynamic)
+# Starts at the configured level and degrades only when a model REJECTS it.
+# "MINIMAL" used to be first; the API now answers 400 INVALID_ARGUMENT for it, so
+# every model burned one wasted call per process just discovering that.
+_THINKING_LADDER = (GEMINI_THINKING_LEVEL, None)  # None = model's own default
 _model_thinking_rung: dict[str, int] = {}
 
 
@@ -101,6 +110,35 @@ def _seconds_until_quota_reset() -> float:
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
     tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return (tomorrow - now).total_seconds() + 60  # small buffer past the reset
+
+
+def _http_options():
+    """Per-request timeout, and no retrying inside the SDK.
+
+    Two separate problems, one object:
+
+    - No timeout is the SDK default, so a stalled connection blocks forever.
+      One call hung for 30m32s on 2026-08-22 and the reply arrived after the
+      LINE reply token had died.
+    - The SDK retries 5 times by default (408/429/5xx) against the SAME model
+      with its own backoff. That competes with the rotation below, which is
+      strictly better informed: it moves to a different capacity tier, parks a
+      model whose daily quota is spent, and honors a server retryDelay. Letting
+      the SDK burn the budget on a model we already know is failing just delays
+      the failover — a 503 took ~14s to surface instead of ~2s.
+
+    Returns None when the installed SDK predates these fields, leaving the old
+    behavior rather than failing to build a client at all.
+    """
+    try:
+        return genai.types.HttpOptions(
+            timeout=GEMINI_REQUEST_TIMEOUT_SECONDS * 1000,   # milliseconds
+            retry_options=genai.types.HttpRetryOptions(attempts=1),
+        )
+    except Exception:
+        log.warning("this google-genai build has no HttpOptions timeout/retry_options — "
+                    "requests will be unbounded", exc_info=True)
+        return None
 
 
 def _thinking_config(model: str):
@@ -152,6 +190,7 @@ def generate(
     max_wait: int | None = None,
     min_chars: int = 1,
     tools: list | None = None,
+    prefer_accuracy: bool = False,
 ) -> str:
     """Generate content, retrying across models until success or timeout.
 
@@ -159,6 +198,7 @@ def generate(
     tools: optional list of genai.types.Tool (e.g. Google Search grounding),
     passed straight through to every model tried — omit for the normal
     ungrounded call every other caller uses.
+    prefer_accuracy: try GEMINI_ACCURACY_MODEL first — see its use below.
     Returns the response text. Raises GeminiQuotaExhausted when the key's
     daily quota is spent on every model, GeminiUnavailable otherwise.
     """
@@ -168,8 +208,14 @@ def generate(
     if max_wait is None:
         max_wait = GEMINI_MAX_WAIT_SECONDS
 
-    client = genai.Client(api_key=api_key)
-    models = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+    client = genai.Client(api_key=api_key, http_options=_http_options())
+    # prefer_accuracy puts the strongest model first for calls where a wrong
+    # number is worse than a slow answer (a meal's nutrition, which the user
+    # then acts on). Everything else leads with the faster default and keeps it
+    # as the first fallback, so an accuracy call still gets an answer if the
+    # strong tier is down.
+    chain = [GEMINI_ACCURACY_MODEL, GEMINI_MODEL] if prefer_accuracy else [GEMINI_MODEL]
+    models = chain + [m for m in GEMINI_FALLBACK_MODELS if m not in chain]
 
     def _build_config(model: str):
         cfg_kwargs = {"max_output_tokens": max_output_tokens}

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 from coach import db
 from coach import gemini
-from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY, TZ
+from coach.config import GEMINI_API_KEY as DEFAULT_GEMINI_KEY
 from coach.plans import create_workout_plan, get_current_plan
 
 log = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ Special abilities (use these directives on their own line at the END of your rep
   "เพิ่มมื้อเช้า ไข่ต้ม 1 ฟอง", "เพิ่มน้ำ 330 ml", "จดข้าวผัด 1 จาน", "กินไข่ต้ม 2 ฟอง",
   "add lunch: chicken salad" — "เพิ่ม" / "ลง" / "บันทึก" / "จด" / "add" + a food or drink
   is ALWAYS a log request, whether or not a meal name follows):
-  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "meal_type": null, "time": null}]
+  [LOG_FOOD: {"food_name_en": "grilled pork skewers (3) with sticky rice", "food_name_local": "หมูปิ้งย่าง (3 ไม้) กับข้าวเหนียว", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "calories_kcal": 475, "protein_g": 22, "total_carbohydrate_g": 55, "total_fat_g": 18, "volume_ml": null, "meal_type": null, "time": null}]
   [LOG_DRINK: {"drink_name_en": "water", "drink_name_local": "น้ำเปล่า", "coaching_suggestion": "one short tip grounded in today's real totals vs target — see rules below", "container_count": 2, "volume_ml": 500, "is_water": true, "calories_kcal": 0, "protein_g": 0, "total_carbohydrate_g": 0, "total_fat_g": 0, "meal_type": null, "time": null}]
   Rules for these two directives:
   - coaching_suggestion is REQUIRED, never omit or leave empty. This is the ONLY
@@ -102,8 +102,17 @@ Special abilities (use these directives on their own line at the END of your rep
     User: "ไอติม soft serve นม ร้าน mos burder 1 โคน"
     → food_name_en = "Milk Soft Serve Ice Cream, Mos Burger (1 cone)"
     → food_name_local = "ไอศกรีมซอฟต์เสิร์ฟรสนม Mos Burger (1 โคน)"
+    Always START WITH A CAPITAL LETTER and use Title Case — "Aburi Salmon Sushi",
+    not "aburi salmon sushi"; "Iced Green Tea", not "iced green tea".
     These names are shown as the card title and logged to Google Health, so make
     them look polished and readable in both languages.
+  - Anything DRINKABLE goes in LOG_DRINK, even when it is thick or a meal in
+    itself — smoothies, protein shakes, blended juice, milk, yoghurt drinks.
+    LOG_DRINK records BOTH the fluid and its nutrition; LOG_FOOD alone throws the
+    fluid away, which is how a 350 kcal Boost smoothie counted for 0 ml of the
+    day's hydration. If you do use LOG_FOOD for something with a real liquid
+    portion (soup, congee), set "volume_ml" to that portion so it still counts as
+    fluid. Leave volume_ml null for solid food.
   - Estimate realistic nutrition/volume from the description and stated portions
     (a glass ≈ 250 ml, a bottle ≈ 500 ml). volume_ml is the TOTAL across containers.
   - Valid single-line JSON only; every number a plain number, never a range or text.
@@ -145,8 +154,9 @@ Special abilities (use these directives on their own line at the END of your rep
 # ---------------------------------------------------------------------------
 
 def _get_recent_metrics(user_id: str, days: int = 7) -> dict:
-    """Get the last N days of health metrics."""
-    cutoff = (datetime.now(TZ).date() - timedelta(days=days)).isoformat()
+    """Get the last N days of health metrics (the USER's days, not the server's)."""
+    cutoff = (datetime.now(db.user_tz(db.get_user(user_id))).date()
+              - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT day, data_type, value_json FROM metrics WHERE user_id = ? AND day >= ? ORDER BY day DESC",
@@ -178,8 +188,9 @@ def _get_recent_metrics(user_id: str, days: int = 7) -> dict:
 
 
 def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
-    """Get recent sleep sessions summarized."""
-    cutoff = (datetime.now(TZ) - timedelta(days=days)).isoformat()
+    """Get recent sleep sessions summarized, in the user's local time."""
+    tz = db.user_tz(db.get_user(user_id))
+    cutoff = (datetime.now(tz) - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT start, end, stages_json, efficiency, score FROM sleep_sessions WHERE user_id = ? AND start >= ? ORDER BY start DESC",
@@ -202,8 +213,8 @@ def _get_recent_sleep(user_id: str, days: int = 7) -> list[dict]:
 
         in_bed_min = sum(totals.values())
         asleep_min = in_bed_min - totals["AWAKE"]
-        start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(TZ)
-        end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(TZ)
+        start_local = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(tz)
+        end_local = datetime.fromisoformat(row["end"].replace("Z", "+00:00")).astimezone(tz)
 
         sessions.append({
             "date": start_local.strftime("%Y-%m-%d"),
@@ -332,6 +343,11 @@ def _ensure_fresh_data(user_id: str) -> None:
 
     This ensures the chat always has reasonably current data without syncing
     on every single message when messages come in rapid succession.
+
+    The sync is nine Google Health calls made INLINE, before the user gets any
+    answer: ~15s on a good day, and 96s during the health.googleapis.com
+    timeouts of 2026-08-22. Callers skip it when the message can't need device
+    data (see _needs_device_data).
     """
     from datetime import datetime, timedelta, timezone
     from coach.sync import run_sync
@@ -351,15 +367,36 @@ def _ensure_fresh_data(user_id: str) -> None:
     except Exception:
         log.warning("sync before chat failed — proceeding with cached data", exc_info=True)
 
+
+def _needs_device_data(text: str, is_quote_reply: bool = False) -> bool:
+    """Whether answering this message could require fresh watch data.
+
+    "เพิ่มน้ำ 250ml" needs nothing from the watch — steps, sleep and exercise
+    have no bearing on writing down a glass of water — yet it paid for a full
+    sync before the reply. Logging, adjusting and deleting are all decided from
+    the message plus our own history, so they skip it; anything else (questions
+    about sleep, steps, recovery, plans, or plain conversation) still syncs.
+    """
+    if _QUESTION_RE.search(text):
+        return True    # "วันนี้เดินไปกี่ก้าว" is exactly what fresh data is for
+    if is_quote_reply:
+        return False   # an adjustment or deletion of an entry we already hold
+    return not (_RECORD_VERB_RE.search(text)
+                or _ADJUST_INTENT_RE.search(text)
+                or _DELETE_INTENT_RE.search(text))
+
 def _build_context_message(user_id: str) -> str:
     """Build a context block with current + historical health data for the agent."""
     from coach.stats import build_trends
 
-    now = datetime.now(TZ)
+    tz = db.user_tz(db.get_user(user_id))
+    now = datetime.now(tz)
     goals = _get_goals(user_id)
     memory = _get_coach_memory(user_id)
 
-    parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({TZ})"]
+    # The model reasons about "today" from this line; the server's clock is not
+    # the user's once anyone signs up outside the server's timezone.
+    parts = [f"Current time: {now.strftime('%Y-%m-%d %H:%M')} ({tz})"]
 
     # Multi-window summary: today, yesterday, weekly & monthly averages, trends.
     # This lets the coach reason about patterns, not just today's snapshot.
@@ -458,6 +495,9 @@ _QUESTION_RE = re.compile(
 # half", "make that 750ml"). These share verbs with the log intents above, so
 # without this the extractor would answer a missed ADJUST_LAST by creating a
 # second, phantom entry instead of rescaling the first.
+# Deleting an entry needs nothing from the watch either.
+_DELETE_INTENT_RE = re.compile(r"ลบ|เคลียร์|\bdelete\b|\bremove\b|\bclear\b", re.IGNORECASE)
+
 # แก้(?!ว) because แก้ว ("glass") merely contains แก้ ("to change") — without
 # the guard, "บันทึกน้ำ 1 แก้ว" reads as a revision and never gets logged.
 _ADJUST_INTENT_RE = re.compile(
@@ -547,7 +587,7 @@ def _extract_log_fallback(user_id: str, user_text: str, api_key: str) -> list[tu
         text = gemini.generate(
             api_key, contents="\n\n".join(prompt_parts),
             system_instruction=_LOG_EXTRACTOR_PROMPT,
-            max_output_tokens=1536, min_chars=2, max_wait=45,
+            max_output_tokens=4096, min_chars=2, max_wait=120, prefer_accuracy=True,
         )
     except Exception:
         log.warning("extractor call failed — leaving the turn unlogged", exc_info=True)
@@ -598,9 +638,14 @@ def handle_message(user_id: str, user_text: str,
         except Exception:
             log.exception("failed to resolve quoted message %s", quoted_message_id)
 
-    # Always refresh health data before responding so the coach has the latest.
-    # Only skip if the last sync was very recent (< 10 minutes ago).
-    _ensure_fresh_data(user_id)
+    # Refresh health data first, but only when the answer could depend on it.
+    # A log/adjust/delete request is decided from the message plus our own
+    # history, so it no longer waits on nine Google Health calls to be told
+    # about steps it never mentions.
+    if _needs_device_data(user_text, is_quote_reply=bool(quoted_message_id)):
+        _ensure_fresh_data(user_id)
+    else:
+        log.info("skipping pre-chat sync — this message needs no device data")
 
     # Store user message
     _save_chat_message(user_id, "user", user_text)
@@ -659,7 +704,7 @@ def handle_message(user_id: str, user_text: str,
         # Shorter budget than scheduled jobs — a person is waiting in chat.
         reply = gemini.generate(
             api_key, contents=full_prompt, system_instruction=CHAT_SYSTEM_PROMPT,
-            max_output_tokens=2048, min_chars=10, max_wait=60,
+            max_output_tokens=4096, min_chars=10, max_wait=180, prefer_accuracy=True,
         )
     except gemini.GeminiQuotaExhausted:
         log.warning("Gemini daily quota exhausted for user %s", user_id)

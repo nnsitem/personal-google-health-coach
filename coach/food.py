@@ -39,6 +39,7 @@ If it's FOOD, use this shape:
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
+  "volume_ml": number or null,
   "notes": "one short sentence on assumptions (portion size, ingredients)",
   "items": [ ... ] OPTIONAL — only for a plate with 2+ separate dishes, see MULTI-ITEM rules below,
   "restaurant_hint": "restaurant/brand name if identifiable, else null — see RESTAURANT rules below"
@@ -108,11 +109,25 @@ RESTAURANT rules (important):
   fill "restaurant_hint" and IGNORE it as a food/drink item (it contributes
   nothing to calories_kcal/items — only the actual food/drink photo(s) do).
 
+Anything DRINKABLE is a DRINK, even when it is thick, blended, or a meal in
+itself: smoothies, protein shakes, blended juices, milk, yoghurt drinks. Use
+"type": "drink" and fill "volume_ml" — the drink shape records BOTH the fluid
+and its nutrition, so nothing is lost. Classifying a smoothie as "food" throws
+away the fluid: it is what made a 350 kcal Boost smoothie count for 0 ml of the
+day's hydration.
+If you do return "type": "food" for something that still contains a real
+quantity of liquid (soup, congee, a bowl of broth), set "volume_ml" to the
+drinkable portion so it is counted as fluid too. Leave it null for solid food.
+
 "coaching_suggestion" rules — this field is REQUIRED in every response, food or
 drink, and must never be an empty string:
 - You'll be given the user's totals already logged today (before this item) and
   their daily targets. Use those REAL numbers, plus this item's own estimated
   nutrition, to decide what's most useful to say next.
+- Display names ("*_name_en" / "*_name_local") must START WITH A CAPITAL LETTER
+  and read like a menu item in Title Case — "Aburi Salmon Sushi", not "aburi
+  salmon sushi"; "Iced Green Tea", not "iced green tea". Google Health shows the
+  English name verbatim.
 - This text appears on a card that doesn't otherwise show which item was just
   logged, so name the item. Format it as ONE natural sentence, ALWAYS starting
   with ✨ (this exact emoji, never ⭐/💡/🎉/💧 or any other): "✨ <item name>
@@ -303,8 +318,9 @@ def _local_today_totals(user_id: str, tz) -> dict:
         totals["protein_g"] += round(_num(c.get("protein_g")))
         totals["fat_g"] += round(_num(c.get("total_fat_g")))
         totals["carbs_g"] += round(_num(c.get("total_carbohydrate_g")))
-        if c.get("type") == "drink":
-            totals["water_ml"] += round(_num(c.get("volume_ml")))
+        # Any entry carrying a volume counts as fluid, not just type=="drink" —
+        # a smoothie logged as food is still something the user drank.
+        totals["water_ml"] += round(_num(c.get("volume_ml")))
     return totals
 
 
@@ -496,12 +512,20 @@ def analyze_food_images(user_id: str, images: list[tuple[bytes, str]],
         f"Already logged today (before this item), vs daily target: {totals_line}"
     )
 
-    image_parts = [genai.types.Part.from_bytes(data=b, mime_type=m) for b, m in images]
+    # Bound the upload. Ordinary LINE photos (<=1.64 MP) are unaffected; this
+    # exists so a full-resolution photo arriving through another path can't turn
+    # one meal into a multi-megabyte request — applied per photo since a batch
+    # can carry several.
+    from coach.images import VISION_MAX_EDGE, downscale
+    image_parts = [
+        genai.types.Part.from_bytes(data=downscale(b, VISION_MAX_EDGE, m), mime_type=m)
+        for b, m in images
+    ]
     try:
         # Shorter budget than scheduled jobs — a person is waiting in chat.
         text = gemini.generate(
             api_key, contents=[prompt, *image_parts],
-            max_output_tokens=1536, max_wait=60,
+            max_output_tokens=4096, max_wait=180, prefer_accuracy=True,
         )
     except gemini.GeminiUnavailable:
         # Capacity outage, not a vision failure — let the caller tell the user
@@ -515,7 +539,7 @@ def analyze_food_images(user_id: str, images: list[tuple[bytes, str]],
         if not data.get("coaching_suggestion"):
             log.warning("vision response missing coaching_suggestion (type=%s)", data.get("type"))
         _normalize_plate_totals(data)
-        return data
+        return _normalize_names(data)
     return None
 
 
@@ -523,6 +547,50 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
                        language: str = "English") -> dict | None:
     """Single-photo convenience wrapper around analyze_food_images()."""
     return analyze_food_images(user_id, [(image_bytes, mime_type)], language=language)
+
+
+_NAME_FIELDS = ("food_name_en", "food_name_local", "drink_name_en", "drink_name_local")
+
+
+def _capitalize_first(name: str) -> str:
+    """Uppercase the first letter, leaving the rest untouched.
+
+    23% of logged names arrived lower-case ("aburi salmon sushi", "water",
+    "mate tea") because the prompt only ever asked for brand names to be
+    capitalised. Google Health shows this string verbatim, so the entry looked
+    sloppy next to the ones that happened to come back title-cased.
+
+    Deliberately NOT .title(): that rewrites the whole string and would turn
+    "McDonald's" into "Mcdonald'S" and "iced tea, 7-Eleven" into something
+    worse. Only an ASCII lower-case first character is touched, so Thai (which
+    has no case) and names already starting with a brand or digit are left
+    exactly as the model wrote them.
+    """
+    if not name:
+        return name
+    first = name[0]
+    return (first.upper() + name[1:]) if "a" <= first <= "z" else name
+
+
+_ITEM_NAME_FIELDS = ("name_en", "name_local")
+
+
+def _normalize_names(analysis: dict) -> dict:
+    """Capitalise every display-name field in place, including each dish of
+    a multi-item plate. Returns the same dict."""
+    if isinstance(analysis, dict):
+        for field in _NAME_FIELDS:
+            value = analysis.get(field)
+            if isinstance(value, str):
+                analysis[field] = _capitalize_first(value.strip())
+        for item in analysis.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            for field in _ITEM_NAME_FIELDS:
+                value = item.get(field)
+                if isinstance(value, str):
+                    item[field] = _capitalize_first(value.strip())
+    return analysis
 
 
 def _extract_json(text: str) -> dict | None:
@@ -569,7 +637,10 @@ def _build_nutrition_datapoint(analysis: dict, now: datetime) -> dict:
 
     # NutritionLog anonymous-food payload. Energy in kcal, macros in grams.
     nutrition_log = {
-        "foodDisplayName": food_name_en[:100],
+        # Last line of defence: adjustments and a caloric drink's nutrition twin
+        # build their own dict, so normalise here too rather than trusting every
+        # caller to have done it.
+        "foodDisplayName": _capitalize_first(food_name_en.strip())[:100],
         "mealType": meal_type,
         "interval": interval,
         "energy": {"kcal": calories},
@@ -696,6 +767,25 @@ def log_hydration_to_health(user_id: str, analysis: dict) -> tuple[bool, str | N
         return False, None
 
 
+def _log_fluid_for_food(user_id: str, analysis: dict) -> str | None:
+    """Also record a FOOD entry's liquid portion as fluid intake.
+
+    The drink path has always written both a hydration point and (when caloric)
+    a nutrition point. The food path wrote nutrition only, so anything drinkable
+    that the model happened to classify as "food" lost its volume entirely: a
+    350 kcal Boost smoothie logged 0 ml of hydration, and protein shakes were
+    stored with the volume sitting in the display name ("เวย์โปรตีน (300 มล.)")
+    where nothing could read it. Returns the hydration point name, or None when
+    there is no liquid to record.
+    """
+    if _num(analysis.get("volume_ml")) <= 0:
+        return None
+    synced, point = log_hydration_to_health(user_id, analysis)
+    if synced:
+        log.info("also logged %s ml of fluid for a food entry", analysis.get("volume_ml"))
+    return point
+
+
 def _store_food_log(user_id: str, analysis: dict, synced: bool) -> int:
     """Record the food log locally (for history + weekly reports).
 
@@ -727,6 +817,7 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
 
     if not isinstance(analysis, dict):
         return labels["not_synced"], None
+    _normalize_names(analysis)
 
     # The model writes these as JSON numbers, but be lenient ("450" etc.)
     for field in ("calories_kcal", "protein_g", "total_carbohydrate_g",
@@ -791,10 +882,11 @@ def log_chat_entry(user_id: str, kind: str, analysis: dict | None) -> tuple[str 
     if round(analysis.get("calories_kcal") or 0) <= 0:
         return labels["empty_food"], None
     synced, point_name = log_food_to_health(user_id, analysis)
+    fluid_point = _log_fluid_for_food(user_id, analysis)
     rowid = _store_food_log(
         user_id,
         {**analysis, "type": "food", "source": "chat",
-         "health_point_names": [n for n in (point_name,) if n]},
+         "health_point_names": [n for n in (point_name, fluid_point) if n]},
         synced,
     )
 
@@ -874,6 +966,8 @@ def _delete_log_points(user_id: str, content: dict, kind: str) -> bool:
         return False
     if kind == "drink" and _num(content.get("calories_kcal")) > 10:
         delete_last_log(user_id, "food")  # caloric drink's nutrition twin, best-effort
+    elif kind == "food" and _num(content.get("volume_ml")) > 0:
+        delete_last_log(user_id, "drink")  # liquid food's hydration twin, best-effort
     return True
 
 
@@ -1181,10 +1275,21 @@ def adjust_last_log(user_id: str, params: dict | None,
             time_str=scaled.get("time"), date_str=scaled.get("date"),
         )
         new_points.extend(food_points)
+        if synced:
+            fluid_point = _log_fluid_for_food(user_id, scaled)
+            if fluid_point:
+                new_points.append(fluid_point)
     else:
         synced, food_point = log_food_to_health(user_id, scaled)
         if food_point:
             new_points.append(food_point)
+        # A liquid food (smoothie, soup) carries a volume that was rescaled with
+        # everything else; re-log it or the adjustment would silently drop the
+        # fluid the original entry recorded.
+        if synced:
+            fluid_point = _log_fluid_for_food(user_id, scaled)
+            if fluid_point:
+                new_points.append(fluid_point)
     scaled["health_point_names"] = new_points
 
     with db.connect() as conn:
@@ -1509,6 +1614,12 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
     else:
         synced, point_name = log_food_to_health(user_id, analysis)
         point_names = [point_name] if point_name else []
+    # The plate's liquid portion (e.g. a bowl of soup alongside the other
+    # dishes), if any, regardless of whether it also has itemized dishes.
+    if synced:
+        fluid_point = _log_fluid_for_food(user_id, analysis)
+        if fluid_point:
+            point_names.append(fluid_point)
     rowid = _store_food_log(
         user_id,
         {**analysis, "items": items, "health_point_names": point_names},

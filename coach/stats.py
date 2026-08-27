@@ -6,6 +6,11 @@ month's averages, and week-over-week trends.
 
 This is what lets the coach "learn from behavior" rather than just report a
 single day's numbers.
+
+Every window here is measured against the USER's local day, not the server's.
+build_trends() resolves the timezone once and threads it through, because these
+helpers decide what "today", "this week" and "the last 30 days" mean — on a
+server in another zone they were silently reading a day off.
 """
 
 import json
@@ -13,7 +18,6 @@ import logging
 from datetime import datetime, timedelta
 
 from coach import db
-from coach.config import TZ
 
 log = logging.getLogger(__name__)
 
@@ -120,9 +124,9 @@ _EXTRACTORS = {
 }
 
 
-def _load_daily_series(user_id: str, days: int) -> dict[str, dict[str, float]]:
+def _load_daily_series(user_id: str, days: int, tz) -> dict[str, dict[str, float]]:
     """Return {data_type: {day: value}} for the last `days` days."""
-    today = datetime.now(TZ).date()
+    today = datetime.now(tz).date()
     cutoff = (today - timedelta(days=days)).isoformat()
 
     series: dict[str, dict[str, float]] = {dt: {} for dt in _EXTRACTORS}
@@ -158,9 +162,10 @@ def _avg(values: list[float]) -> float | None:
     return round(sum(vals) / len(vals), 1) if vals else None
 
 
-def _window_avg(day_map: dict[str, float], start_days_ago: int, end_days_ago: int) -> float | None:
+def _window_avg(day_map: dict[str, float], start_days_ago: int, end_days_ago: int,
+                tz) -> float | None:
     """Average of values whose day is in [today-start, today-end)."""
-    today = datetime.now(TZ).date()
+    today = datetime.now(tz).date()
     picked = []
     for d, v in day_map.items():
         try:
@@ -199,7 +204,7 @@ def _asleep_minutes(stages: list[dict]) -> float:
     return total
 
 
-def _sleep_series(user_id: str, days: int) -> dict[str, float]:
+def _sleep_series(user_id: str, days: int, tz) -> dict[str, float]:
     """Return {wake_date: asleep_hours of the MAIN sleep period ending that date}.
 
     - Sessions separated by ≤3h are merged into one period, so an interrupted
@@ -208,7 +213,7 @@ def _sleep_series(user_id: str, days: int) -> dict[str, float]:
       local date as the night and previously OVERWROTE it (the coach then
       reported the nap's 3.5h while the app showed the night's 6h).
     """
-    today = datetime.now(TZ).date()
+    today = datetime.now(tz).date()
     cutoff = (today - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
@@ -239,7 +244,7 @@ def _sleep_series(user_id: str, days: int) -> dict[str, float]:
 
     out: dict[str, float] = {}
     for _, en, asleep in periods:
-        d = en.astimezone(TZ).date().isoformat()
+        d = en.astimezone(tz).date().isoformat()
         hours = round(asleep / 60, 1)
         if hours > out.get(d, 0.0):
             out[d] = hours
@@ -252,7 +257,7 @@ def _pct_dev(value: float | None, baseline: float | None) -> float | None:
     return (value - baseline) / baseline * 100
 
 
-def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float]) -> dict | None:
+def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float], tz) -> dict | None:
     """Combine resting-HR, HRV, sleep (+ SpO2/respiratory-rate anomaly checks)
     into a recovery verdict, comparing today/yesterday against a trailing
     30-day baseline (excluding the last 2 days so an off night doesn't skew
@@ -262,7 +267,7 @@ def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float])
     (unverified data-type strings, see sync.py LIST_TYPES) — the score is
     computed from whichever signals are actually present.
     """
-    today = datetime.now(TZ).date()
+    today = datetime.now(tz).date()
     yesterday = today - timedelta(days=1)
     t_iso, y_iso = today.isoformat(), yesterday.isoformat()
 
@@ -270,7 +275,7 @@ def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float])
         latest = day_map.get(t_iso)
         if latest is None:
             latest = day_map.get(y_iso)
-        return latest, _window_avg(day_map, 30, 2)
+        return latest, _window_avg(day_map, 30, 2, tz)
 
     signals: dict = {}
     contributions: list[float] = []
@@ -326,10 +331,10 @@ def _readiness(series: dict[str, dict[str, float]], sleep_map: dict[str, float])
     return {"score": score, "verdict": verdict, "signals": signals, "anomalies": anomalies}
 
 
-def _exercise_series(user_id: str, days: int) -> tuple[dict[str, float], dict[str, int]]:
+def _exercise_series(user_id: str, days: int, tz) -> tuple[dict[str, float], dict[str, int]]:
     """Return ({day: total_minutes}, {day: session_count}) from exercise_sessions,
     bucketed by the session's start date."""
-    today = datetime.now(TZ).date()
+    today = datetime.now(tz).date()
     cutoff = (today - timedelta(days=days)).isoformat()
     with db.connect() as conn:
         rows = conn.execute(
@@ -345,22 +350,26 @@ def _exercise_series(user_id: str, days: int) -> tuple[dict[str, float], dict[st
             en = datetime.fromisoformat(row["end"].replace("Z", "+00:00"))
         except ValueError:
             continue
-        d = st.astimezone(TZ).date().isoformat()
+        d = st.astimezone(tz).date().isoformat()
         minutes[d] = minutes.get(d, 0.0) + (en - st).total_seconds() / 60
         counts[d] = counts.get(d, 0) + 1
     return minutes, counts
 
 
-def build_trends(user_id: str) -> dict:
+def build_trends(user_id: str, tz=None) -> dict:
     """Build a compact multi-window summary with today, yesterday, weekly and
     monthly averages, and week-over-week trends for each metric.
+
+    Windows follow the USER's local day. Resolved once here and passed down, so
+    every helper agrees on where "today" ends.
     """
-    today = datetime.now(TZ).date()
+    tz = tz or db.user_tz(db.get_user(user_id))
+    today = datetime.now(tz).date()
     yesterday = today - timedelta(days=1)
     t_iso, y_iso = today.isoformat(), yesterday.isoformat()
 
-    series = _load_daily_series(user_id, 35)  # enough for month + prior-week comparison
-    out: dict = {"as_of": datetime.now(TZ).strftime("%Y-%m-%d %H:%M")}
+    series = _load_daily_series(user_id, 35, tz)  # month + prior-week comparison
+    out: dict = {"as_of": datetime.now(tz).strftime("%Y-%m-%d %H:%M"), "timezone": str(tz)}
 
     labels = {
         "steps": "steps",
@@ -374,36 +383,36 @@ def build_trends(user_id: str) -> dict:
 
     for dt, key in labels.items():
         day_map = series.get(dt, {})
-        this_week = _window_avg(day_map, 7, 0)
-        last_week = _window_avg(day_map, 14, 7)
+        this_week = _window_avg(day_map, 7, 0, tz)
+        last_week = _window_avg(day_map, 14, 7, tz)
         out[key] = {
             "today": day_map.get(t_iso),
             "yesterday": day_map.get(y_iso),
             "week_avg": this_week,
-            "month_avg": _window_avg(day_map, 30, 0),
+            "month_avg": _window_avg(day_map, 30, 0, tz),
             "trend": _trend(this_week, last_week),
         }
 
     # Sleep
-    sleep_map = _sleep_series(user_id, 35)
-    this_week_sleep = _window_avg(sleep_map, 7, 0)
-    last_week_sleep = _window_avg(sleep_map, 14, 7)
+    sleep_map = _sleep_series(user_id, 35, tz)
+    this_week_sleep = _window_avg(sleep_map, 7, 0, tz)
+    last_week_sleep = _window_avg(sleep_map, 14, 7, tz)
     out["sleep_hours"] = {
         "last_night": sleep_map.get(t_iso) or sleep_map.get(y_iso),
         "week_avg": this_week_sleep,
-        "month_avg": _window_avg(sleep_map, 30, 0),
+        "month_avg": _window_avg(sleep_map, 30, 0, tz),
         "trend": _trend(this_week_sleep, last_week_sleep),
     }
 
-    out["readiness"] = _readiness(series, sleep_map)
+    out["readiness"] = _readiness(series, sleep_map, tz)
 
     # Exercise sessions (actual workouts vs plan adherence)
-    exercise_min_map, exercise_count_map = _exercise_series(user_id, 35)
-    this_week_min = _window_avg(exercise_min_map, 7, 0)
-    last_week_min = _window_avg(exercise_min_map, 14, 7)
+    exercise_min_map, exercise_count_map = _exercise_series(user_id, 35, tz)
+    this_week_min = _window_avg(exercise_min_map, 7, 0, tz)
+    last_week_min = _window_avg(exercise_min_map, 14, 7, tz)
     out["exercise_minutes"] = {
         "week_avg": this_week_min,
-        "month_avg": _window_avg(exercise_min_map, 30, 0),
+        "month_avg": _window_avg(exercise_min_map, 30, 0, tz),
         "trend": _trend(this_week_min, last_week_min),
         "sessions_this_week": sum(
             c for d, c in exercise_count_map.items()

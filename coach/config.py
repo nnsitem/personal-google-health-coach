@@ -39,16 +39,50 @@ TZ = ZoneInfo(os.environ.get("TZ", "UTC"))
 
 # Gemini (Google AI) settings
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-# Fallback models if primary is unavailable — each must be a genuinely different
-# capacity tier or a flash 503 spike takes out the whole chain. Note that
-# gemini-flash-latest is an alias for gemini-3.5-flash (since 2026-05-19), so
-# listing 3.5-flash as a fallback adds nothing; flash-lite and pro run on
-# separate capacity (verified responsive during a flash 503 outage).
-GEMINI_FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-pro-latest"]
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-pro-latest")
+# Chosen for STABILITY, measured 2026-08-23 with 5 identical calls per model:
+#
+#   5/5  gemini-3.5-flash-lite      p50 1.02s  max  1.13s
+#   5/5  gemini-flash-lite-latest   p50 1.14s  max  1.23s
+#   5/5  gemini-3.7-flash           p50 2.65s  max  6.97s
+#   5/5  gemini-pro-latest          p50 2.72s  max  3.74s
+#   5/5  gemini-3.6-flash           p50 8.50s  max 14.97s
+#   5/5  gemini-3.5-flash           p50 11.30s max 13.42s
+#   3/5  gemini-flash-latest        ConnectError + 503        <- the only failure
+#
+# gemini-flash-latest had been the primary, and it is the one model that failed —
+# matching every incident of 2026-08-22/23: a 502, a 503, and a request that hung
+# 30m32s. An alias tracking the newest release rides the least settled capacity.
+# gemini-pro-latest was perfect here, has the tightest spread of the capable
+# models, accepts every thinking level, and is the most accurate — so it serves
+# both this instruction and the accuracy-first one.
+#
+# Fallbacks are pinned GA versions rather than aliases: no silent tier change,
+# and neither has an announced shutdown date. Slower than the aliases, which the
+# owner has explicitly deprioritised. gemini-3.7-flash is left out despite 5/5
+# here because it answered 503 on every thinking level an hour earlier.
+#
+# Re-measure occasionally: pinned models do not auto-upgrade.
+GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+
+# Used for calls where a wrong number is worse than a slow answer: estimating a
+# meal's nutrition from a photo, and the chat turn that writes the log entry.
+GEMINI_ACCURACY_MODEL = os.environ.get("GEMINI_ACCURACY_MODEL", "gemini-pro-latest")
+
+GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "LOW")
 # Total time budget (seconds) to keep retrying Gemini across models. Replies go
 # via LINE push (not a time-limited reply token), so we can afford a long window.
 GEMINI_MAX_WAIT_SECONDS = int(os.environ.get("GEMINI_MAX_WAIT_SECONDS", "120"))
+# Hard ceiling on a SINGLE Gemini HTTP request. The SDK applies none by
+# default, and on 2026-08-22 one generateContent call hung for 30 minutes
+# before finally answering 502 — the user's "เพิ่มน้ำ 250ml" was logged and
+# answered half an hour later, long after the LINE reply token had expired.
+# GEMINI_MAX_WAIT_SECONDS only decides whether to start another round; it
+# cannot interrupt a request already in flight, so this is what bounds it.
+# 120s, not 30s: accuracy is preferred over speed here, and cutting off a slow
+# but correct answer only to retry on a weaker model is the wrong trade. Still a
+# hard bound — the incident this exists for was a single request hanging 30m32s.
+GEMINI_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("GEMINI_REQUEST_TIMEOUT_SECONDS", "120"))
 
 # Daily summary delivery time (local TZ)
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "10"))
