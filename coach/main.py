@@ -15,6 +15,8 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -35,6 +37,134 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone=str(TZ))
+
+
+# --- Photo batching -----------------------------------------------------
+#
+# LINE delivers each photo (and each text message) as its own webhook event,
+# handled by its own background thread (FastAPI's BackgroundTasks runs sync
+# handlers via a thread pool, not on the asyncio loop — plain `threading`
+# primitives are what's actually safe to share across these calls). Sending
+# several photos together, or a photo followed by a quick caption, should
+# read as ONE meal/log rather than N separate ones — so an image message
+# doesn't analyze immediately: it joins a short-lived per-user batch that
+# resets a debounce timer on every new arrival (image or text) and only
+# finalizes (runs the actual Gemini analysis + log) once nothing new has
+# come in for _PHOTO_BATCH_WINDOW_SECONDS. A single photo with no follow-up
+# still goes through this path — it "batches" as a batch of one — so
+# existing single-photo behavior is unchanged except for that added wait.
+_PHOTO_BATCH_WINDOW_SECONDS = float(os.environ.get("PHOTO_BATCH_WINDOW_SECONDS", "3.5"))
+_MAX_BATCH_IMAGES = 6
+
+_pending_photo_batches: dict[str, dict] = {}
+_pending_photo_lock = threading.Lock()
+
+
+def _touch_photo_batch(user_id: str, *, create: bool = False,
+                       image: tuple[bytes, str] | None = None,
+                       text: str | None = None,
+                       message_id: str | None = None,
+                       reply_token: str | None = None) -> bool:
+    """Add an image and/or text to the user's open photo batch and (re)start
+    its debounce timer. With create=False, does nothing and returns False
+    when no batch is currently open (the caller should fall through to its
+    normal handling — this is how a plain text message not following a
+    photo stays untouched). Returns True whenever the item was attached to
+    a batch (new or existing).
+    """
+    with _pending_photo_lock:
+        batch = _pending_photo_batches.get(user_id)
+        if batch is None:
+            if not create:
+                return False
+            batch = {"images": [], "texts": [], "message_ids": [], "reply_token": None, "timer": None}
+            _pending_photo_batches[user_id] = batch
+
+        if image is not None:
+            if len(batch["images"]) >= _MAX_BATCH_IMAGES:
+                log.info("photo batch for %s hit the %d-image cap — extra photo ignored",
+                         user_id, _MAX_BATCH_IMAGES)
+            else:
+                batch["images"].append(image)
+        if text:
+            batch["texts"].append(text)
+        if message_id:
+            batch["message_ids"].append(message_id)
+        if reply_token:
+            batch["reply_token"] = reply_token  # keep the most recent — replies fall back to push anyway
+
+        if batch["timer"]:
+            batch["timer"].cancel()
+        delay = 0.3 if len(batch["images"]) >= _MAX_BATCH_IMAGES else _PHOTO_BATCH_WINDOW_SECONDS
+        timer = threading.Timer(delay, _finalize_photo_batch, args=(user_id,))
+        timer.daemon = True
+        batch["timer"] = timer
+        timer.start()
+        return True
+
+
+def _finalize_photo_batch(user_id: str) -> None:
+    """Runs on the debounce timer's own thread once a photo batch has gone
+    quiet: analyze every photo (+ any caption text) as one meal and reply."""
+    with _pending_photo_lock:
+        batch = _pending_photo_batches.pop(user_id, None)
+    if not batch or not batch["images"]:
+        return
+
+    from coach.food import handle_food_photos, get_daily_progress
+    from coach.flex import build_daily_progress_bubble
+
+    reply_token = batch["reply_token"]
+    log.info("finalizing photo batch for %s: %d photo(s), %d caption text(s)",
+             user_id, len(batch["images"]), len(batch["texts"]))
+
+    # Defaults to the FULL caption text so it's still forwarded to chat below
+    # even if handle_food_photos() raises before it can judge relevance
+    # itself — a crash in the photo path must not also swallow the user's
+    # typed message.
+    leftover_caption = " / ".join(t.strip() for t in batch["texts"] if t and t.strip()) or None
+    try:
+        reply, log_rowid, leftover_caption = handle_food_photos(
+            user_id, batch["images"], captions=batch["texts"] or None)
+        messages_to_send = [reply]
+        # Combine log + progress into a carousel (swipe to see progress) —
+        # same presentation as the pre-batching single-photo flow.
+        try:
+            if isinstance(reply, FlexReply):
+                progress = get_daily_progress(user_id)
+                progress_bubble = build_daily_progress_bubble(
+                    current=progress["current"], targets=progress["targets"],
+                    lang=progress["lang"], coaching_note=reply.coaching_note,
+                )
+                if progress_bubble:
+                    carousel = {"type": "carousel", "contents": [reply.bubble, progress_bubble]}
+                    messages_to_send = [FlexReply(reply.alt_text, carousel)]
+        except Exception:
+            pass
+        sent_ids = _send_multi(user_id, messages_to_send, reply_token)
+        # Map the coach's confirmation AND every contributing message (all
+        # photos + any caption text) — a quote-reply to any of them should
+        # target this one log.
+        _map_sent_log(user_id, sent_ids + batch["message_ids"],
+                      [log_rowid] if log_rowid is not None else [])
+    except Exception:
+        log.exception("failed to handle photo batch for %s", user_id)
+        try:
+            _send(user_id, "Sorry, I couldn't analyze that photo. Please try again. 🙏", reply_token)
+        except Exception:
+            pass
+
+    # A caption the model judged unrelated to the food (or one sent while
+    # analysis crashed/failed before it could judge, or before analysis ran
+    # at all) must not vanish — forward it through the normal chat pipeline
+    # as a follow-up, independent of whether the photo analysis succeeded.
+    if leftover_caption:
+        try:
+            chat_reply, chat_rowids, extra_flex = handle_message(user_id, leftover_caption)
+            more_ids = _send_multi(user_id, [chat_reply, *extra_flex])
+            _map_sent_log(user_id, more_ids, chat_rowids)
+        except Exception:
+            log.exception("failed to forward leftover caption text to chat for %s", user_id)
 
 
 # --- Scheduled jobs (multi-user: iterate all configured users) --------------
@@ -444,6 +574,19 @@ def _process_text_message(user_id: str, text: str, reply_token: str | None = Non
     if not _ensure_configured(user_id, user, reply_token):
         return
 
+    # A caption sent right after a photo (or while more photos are still
+    # arriving) joins that open batch instead of going to chat here —
+    # handle_food_photos() decides whether it's actually relevant to the
+    # food and, if not, _finalize_photo_batch() forwards it back to chat
+    # itself so it's never silently dropped. A quote-reply is always an
+    # explicit targeted action (e.g. adjusting a specific past log), so it
+    # skips batching and goes straight to chat as before.
+    if not quoted_message_id and _touch_photo_batch(
+        user_id, create=False, text=text, message_id=inbound_message_id, reply_token=reply_token,
+    ):
+        log.info("attached trailing text from %s to its open photo batch", user_id)
+        return
+
     # Pass to the chat agent
     try:
         reply, log_rowids, extra_flex = handle_message(user_id, text, quoted_message_id=quoted_message_id)
@@ -536,52 +679,30 @@ def _handle_gemini_key_input(user_id: str, key: str, reply_token: str | None = N
 
 
 def _process_image_message(user_id: str, message_id: str, reply_token: str | None = None) -> None:
-    """Handle an image message in the background."""
+    """Handle an image message in the background: download it and add it to
+    the user's short-lived photo batch (see _touch_photo_batch) rather than
+    analyzing immediately, so photos sent together — or a caption text sent
+    right after — are logged as one meal instead of separately."""
     from coach.line import get_image_content
-    from coach.food import handle_food_photo
 
     # Require full setup before touching the user's Gemini key / Google token
     if not _ensure_configured(user_id, db.get_user(user_id), reply_token):
         return
 
-    log.info("LINE image from %s (id=%s) — analyzing", user_id, message_id)
     try:
         image_bytes = get_image_content(message_id)
         mime = _detect_image_mime(image_bytes)
-        reply, log_rowid = handle_food_photo(user_id, image_bytes, mime_type=mime)
-        messages_to_send = [reply]
-        # Combine log + progress into a carousel (swipe to see progress)
-        try:
-            from coach.food import get_daily_progress
-            from coach.flex import FlexReply, build_daily_progress_bubble
-            if isinstance(reply, FlexReply):
-                progress = get_daily_progress(user_id)
-                progress_bubble = build_daily_progress_bubble(
-                    current=progress["current"],
-                    targets=progress["targets"],
-                    lang=progress["lang"],
-                    coaching_note=reply.coaching_note,
-                )
-                if progress_bubble:
-                    carousel = {
-                        "type": "carousel",
-                        "contents": [reply.bubble, progress_bubble],
-                    }
-                    messages_to_send = [FlexReply(reply.alt_text, carousel)]
-        except Exception:
-            pass
-        sent_ids = _send_multi(user_id, messages_to_send, reply_token)
-        # Map the coach's confirmation AND the user's own photo message — a
-        # quote-reply to either should target this log.
-        _map_sent_log(user_id, sent_ids + [message_id],
-                      [log_rowid] if log_rowid is not None else [])
-        log.info("photo processed (rowid=%s)", log_rowid)
     except Exception:
-        log.exception("failed to handle photo")
+        log.exception("failed to download photo %s", message_id)
         try:
-            _send(user_id, "Sorry, I couldn't analyze that photo. Please try again. 🙏", reply_token)
+            _send(user_id, "Sorry, I couldn't download that photo. Please try again. 🙏", reply_token)
         except Exception:
             pass
+        return
+
+    log.info("LINE image from %s (id=%s) — added to photo batch", user_id, message_id)
+    _touch_photo_batch(user_id, create=True, image=(image_bytes, mime),
+                       message_id=message_id, reply_token=reply_token)
 
 
 @app.post("/webhook")

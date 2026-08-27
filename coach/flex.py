@@ -475,13 +475,16 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
                      notes: str | None, synced: bool, sync_label: str,
                      low_conf_label: str | None = None,
                      image_url: str | None = None,
-                     coaching_note: str | None = None) -> dict:
+                     coaching_note: str | None = None,
+                     items: list[tuple[str, str]] | None = None) -> dict:
     """A food/drink log confirmation card.
 
     Layout (top to bottom): optional hero photo, the logged item's name as a
     bold title (quantity stripped since it's shown in the badge), a colored
     highlight badge for the single most important stat (kcal for food, volume
-    for drinks), the rest of the macros as receipt-style itemized rows, an
+    for drinks), an optional itemized breakdown (`items`, for a multi-dish
+    plate — each dish name + its own kcal), the rest of the macros as
+    receipt-style itemized rows (plate TOTALS when `items` is given), an
     optional muted notes line, and a footer STATUS row.
     """
     import re as _re
@@ -520,6 +523,28 @@ def build_log_bubble(*, name: str, kicker: str, accent_color: str,
         "margin": "md",
         "contents": badge_row_contents,
     })
+
+    if items:
+        body_contents.append({"type": "separator", "margin": "lg"})
+        body_contents.append({
+            "type": "box",
+            "layout": "vertical",
+            "margin": "lg",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "baseline",
+                    "contents": [
+                        {"type": "text", "text": item_name, "size": "sm", "color": TEXT_DARK,
+                         "flex": 3, "wrap": True},
+                        {"type": "text", "text": item_value, "size": "sm", "color": TEXT_MUTED,
+                         "align": "end", "flex": 2},
+                    ],
+                }
+                for item_name, item_value in items
+            ],
+        })
 
     if rows:
         body_contents.append({"type": "separator", "margin": "lg"})
