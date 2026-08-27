@@ -53,7 +53,7 @@ scheduler = BackgroundScheduler(timezone=str(TZ))
 # come in for _PHOTO_BATCH_WINDOW_SECONDS. A single photo with no follow-up
 # still goes through this path — it "batches" as a batch of one — so
 # existing single-photo behavior is unchanged except for that added wait.
-_PHOTO_BATCH_WINDOW_SECONDS = float(os.environ.get("PHOTO_BATCH_WINDOW_SECONDS", "3.5"))
+_PHOTO_BATCH_WINDOW_SECONDS = float(os.environ.get("PHOTO_BATCH_WINDOW_SECONDS") or "3.5")
 _MAX_BATCH_IMAGES = 6
 
 _pending_photo_batches: dict[str, dict] = {}
@@ -71,19 +71,31 @@ def _touch_photo_batch(user_id: str, *, create: bool = False,
     normal handling — this is how a plain text message not following a
     photo stays untouched). Returns True whenever the item was attached to
     a batch (new or existing).
+
+    Each touch bumps the batch's "epoch" and the scheduled timer carries the
+    epoch it was started for; _finalize_photo_batch only proceeds if that
+    epoch is still current. threading.Timer.cancel() cannot be trusted alone
+    here — it only prevents a timer that hasn't started running yet, so a
+    timer whose interval elapses at the same instant a new touch arrives can
+    still fire (see cancel()'s documented "no effect once run() has started"
+    behavior). The epoch check, taken under the same lock as every touch, is
+    what actually guarantees a stale timer's finalize is a no-op rather than
+    an early/duplicate finalize.
     """
     with _pending_photo_lock:
         batch = _pending_photo_batches.get(user_id)
         if batch is None:
             if not create:
                 return False
-            batch = {"images": [], "texts": [], "message_ids": [], "reply_token": None, "timer": None}
+            batch = {"images": [], "texts": [], "message_ids": [], "reply_token": None,
+                     "timer": None, "epoch": 0}
             _pending_photo_batches[user_id] = batch
 
         if image is not None:
             if len(batch["images"]) >= _MAX_BATCH_IMAGES:
                 log.info("photo batch for %s hit the %d-image cap — extra photo ignored",
                          user_id, _MAX_BATCH_IMAGES)
+                message_id = None  # this photo contributed nothing — don't map it to the eventual log
             else:
                 batch["images"].append(image)
         if text:
@@ -94,21 +106,33 @@ def _touch_photo_batch(user_id: str, *, create: bool = False,
             batch["reply_token"] = reply_token  # keep the most recent — replies fall back to push anyway
 
         if batch["timer"]:
-            batch["timer"].cancel()
+            batch["timer"].cancel()  # best-effort; the epoch check below is what's actually relied on
+        batch["epoch"] += 1
+        epoch = batch["epoch"]
         delay = 0.3 if len(batch["images"]) >= _MAX_BATCH_IMAGES else _PHOTO_BATCH_WINDOW_SECONDS
-        timer = threading.Timer(delay, _finalize_photo_batch, args=(user_id,))
+        timer = threading.Timer(delay, _finalize_photo_batch, args=(user_id, epoch))
         timer.daemon = True
         batch["timer"] = timer
         timer.start()
         return True
 
 
-def _finalize_photo_batch(user_id: str) -> None:
+def _finalize_photo_batch(user_id: str, epoch: int) -> None:
     """Runs on the debounce timer's own thread once a photo batch has gone
-    quiet: analyze every photo (+ any caption text) as one meal and reply."""
+    quiet: analyze every photo (+ any caption text) as one meal and reply.
+
+    `epoch` pins this call to the specific touch that scheduled it — see
+    _touch_photo_batch's docstring for why that (not Timer.cancel()) is what
+    prevents a stale timer from finalizing a batch early or twice.
+    """
+    from coach.food import join_captions
+
     with _pending_photo_lock:
-        batch = _pending_photo_batches.pop(user_id, None)
-    if not batch or not batch["images"]:
+        batch = _pending_photo_batches.get(user_id)
+        if batch is None or batch.get("epoch") != epoch:
+            return  # superseded by a later touch — that touch's own timer will finalize
+        batch = _pending_photo_batches.pop(user_id)
+    if not batch["images"]:
         return
 
     from coach.food import handle_food_photos, get_daily_progress
@@ -122,7 +146,7 @@ def _finalize_photo_batch(user_id: str) -> None:
     # even if handle_food_photos() raises before it can judge relevance
     # itself — a crash in the photo path must not also swallow the user's
     # typed message.
-    leftover_caption = " / ".join(t.strip() for t in batch["texts"] if t and t.strip()) or None
+    leftover_caption = join_captions(batch["texts"])
     try:
         reply, log_rowid, leftover_caption = handle_food_photos(
             user_id, batch["images"], captions=batch["texts"] or None)
