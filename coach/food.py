@@ -374,6 +374,15 @@ def _num(x) -> float:
         return 0.0
 
 
+def join_captions(captions: list[str] | None) -> str | None:
+    """Join caption text(s) sent alongside/after a photo batch into one
+    string for the vision prompt (and, unchanged, as the fallback text
+    forwarded to chat) — one shared implementation so the two call sites
+    plus main.py's crash-path fallback can't drift apart."""
+    joined = " / ".join(c.strip() for c in (captions or []) if c and c.strip())
+    return joined or None
+
+
 def _plate_items(analysis: dict) -> list[dict] | None:
     """The analysis's "items" array, if it describes a real multi-item plate
     (2+ entries with a positive calorie estimate). Otherwise None, so a
@@ -488,7 +497,7 @@ def analyze_food_images(user_id: str, images: list[tuple[bytes, str]],
             "RESTAURANT rules."
         )
 
-    caption_text = " / ".join(c.strip() for c in (captions or []) if c and c.strip())
+    caption_text = join_captions(captions)
     if caption_text:
         prompt += (
             f"\n\nThe user sent this text right after the photo(s): \"{caption_text}\"\n"
@@ -1552,7 +1561,7 @@ def handle_food_photos(user_id: str, images: list[tuple[bytes, str]],
 
     language = _get_language(user_id)
     labels = LABELS.get(_lang_code(language), LABELS["en"])
-    caption_text = " / ".join(c.strip() for c in (captions or []) if c and c.strip()) or None
+    caption_text = join_captions(captions)
 
     try:
         analysis = analyze_food_images(user_id, images, captions, language=language)

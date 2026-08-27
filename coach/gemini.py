@@ -214,7 +214,13 @@ def generate(
     # then acts on). Everything else leads with the faster default and keeps it
     # as the first fallback, so an accuracy call still gets an answer if the
     # strong tier is down.
-    chain = [GEMINI_ACCURACY_MODEL, GEMINI_MODEL] if prefer_accuracy else [GEMINI_MODEL]
+    # Dedup while preserving order — GEMINI_ACCURACY_MODEL and GEMINI_MODEL
+    # default to the same model, and trying an identical model twice in a
+    # row wastes a full request/response cycle on any error that doesn't
+    # set a cooldown (the model isn't parked, so the second identical entry
+    # isn't skipped either).
+    raw_chain = [GEMINI_ACCURACY_MODEL, GEMINI_MODEL] if prefer_accuracy else [GEMINI_MODEL]
+    chain = list(dict.fromkeys(raw_chain))
     models = chain + [m for m in GEMINI_FALLBACK_MODELS if m not in chain]
 
     def _build_config(model: str):
