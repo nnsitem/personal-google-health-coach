@@ -40,8 +40,28 @@ If it's FOOD, use this shape:
   "total_carbohydrate_g": number,
   "total_fat_g": number,
   "volume_ml": number or null,
-  "notes": "one short sentence on assumptions (portion size, ingredients)"
+  "notes": "one short sentence on assumptions (portion size, ingredients)",
+  "items": [ ... ] OPTIONAL — only for a plate with 2+ separate dishes, see MULTI-ITEM rules below,
+  "restaurant_hint": "restaurant/brand name if identifiable, else null — see RESTAURANT rules below"
 }
+
+MULTI-ITEM PLATE rules (important):
+- Most photos show ONE dish (e.g. fried rice, a bowl of noodles) — for those,
+  omit "items" entirely and just fill the top-level fields as before. Do NOT
+  explode a single mixed dish into its ingredients (fried rice is one item,
+  not "rice" + "egg" + "vegetables" separately).
+- Only add "items" when the photo shows 2+ SEPARATE dishes plated together
+  (e.g. a Thai rice-and-curry tray: steamed rice + a curry + a fried egg as
+  distinct servings, or a Western plate: grilled chicken + salad + potatoes).
+  Each array entry is one dish:
+  {"name_en": "short dish name in ENGLISH", "name_local": "same name in the
+  user's language", "calories_kcal": number, "protein_g": number,
+  "total_carbohydrate_g": number, "total_fat_g": number}
+- When "items" is present, the top-level food_name_en/food_name_local must
+  describe the WHOLE plate (e.g. "Rice with fried egg and stir-fried
+  vegetables"), and the top-level calories_kcal/protein_g/
+  total_carbohydrate_g/total_fat_g MUST equal the SUM of all items — they are
+  used elsewhere as the plate's totals, so they must stay consistent.
 
 If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
 {
@@ -57,7 +77,8 @@ If it's a DRINK (water bottle, glass, cup, etc.), use this shape:
   "protein_g": number,
   "total_carbohydrate_g": number,
   "total_fat_g": number,
-  "notes": "one short sentence on assumptions (how many containers, size each)"
+  "notes": "one short sentence on assumptions (how many containers, size each)",
+  "restaurant_hint": "restaurant/brand name if identifiable, else null — see RESTAURANT rules below"
 }
 
 DRINK volume rules (important — read carefully):
@@ -76,6 +97,17 @@ DRINK volume rules (important — read carefully):
 
 Estimate realistic values for what's shown. If there is no drink container at all
 in the photo, set "type" to "unknown".
+
+RESTAURANT rules (important):
+- "restaurant_hint" is about IDENTIFYING the source, not about the dish itself.
+  Set it only when a restaurant/chain/brand name is actually readable or clearly
+  recognizable somewhere in the photo(s) — on packaging, a cup/container logo, a
+  receipt, a menu board, or a storefront sign. Otherwise leave it null; do not
+  guess a brand from the food's appearance alone.
+- When multiple photos were sent together, one of them may show ONLY packaging,
+  a logo, a menu board, or the storefront (not food) — use that photo purely to
+  fill "restaurant_hint" and IGNORE it as a food/drink item (it contributes
+  nothing to calories_kcal/items — only the actual food/drink photo(s) do).
 
 Anything DRINKABLE is a DRINK, even when it is thick, blended, or a meal in
 itself: smoothies, protein shakes, blended juices, milk, yoghurt drinks. Use
@@ -342,6 +374,36 @@ def _num(x) -> float:
         return 0.0
 
 
+def _plate_items(analysis: dict) -> list[dict] | None:
+    """The analysis's "items" array, if it describes a real multi-item plate
+    (2+ entries with a positive calorie estimate). Otherwise None, so a
+    single-dish photo (no "items", or a stray one-entry array) logs and
+    displays exactly as before."""
+    items = analysis.get("items")
+    if not isinstance(items, list):
+        return None
+    valid = [it for it in items if isinstance(it, dict) and _num(it.get("calories_kcal")) > 0]
+    return valid if len(valid) >= 2 else None
+
+
+def _normalize_plate_totals(analysis: dict) -> None:
+    """Force the top-level nutrition fields to equal the sum of `items`
+    (when it's a real multi-item plate), in place.
+
+    The prompt tells the model the top-level fields MUST equal the items'
+    sum, but nothing enforces that server-side — and the top-level fields
+    are what the highlight badge, daily totals, adjust-log scaling, and the
+    restaurant-lookup refinement all read. Without this, a model that
+    forgets to keep them in sync silently shows a total that disagrees with
+    its own itemized breakdown on the same card.
+    """
+    items = _plate_items(analysis)
+    if not items:
+        return
+    for field in ("calories_kcal", "protein_g", "total_carbohydrate_g", "total_fat_g"):
+        analysis[field] = round(sum(_num(it.get(field)) for it in items), 1)
+
+
 def _resolve_log_time(analysis: dict, tz) -> datetime:
     """When the log happened, in the user's local time.
 
@@ -390,11 +452,20 @@ def _lang_code(language: str) -> str:
     return "en"
 
 
-def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image/jpeg",
-                       language: str = "English") -> dict | None:
-    """Run Gemini vision on the image and return a nutrition estimate dict.
+def analyze_food_images(user_id: str, images: list[tuple[bytes, str]],
+                        captions: list[str] | None = None,
+                        language: str = "English") -> dict | None:
+    """Run Gemini vision on one or more photos (sent together as one meal)
+    and return a single merged nutrition estimate dict.
 
-    Returns None if analysis fails or the image isn't food.
+    `images` is a list of (image_bytes, mime_type) — multiple photos are
+    analyzed in ONE call so the model can treat them as the same eating
+    occasion (see MULTI-ITEM/RESTAURANT rules in FOOD_VISION_PROMPT) rather
+    than as separate meals. `captions` are any text message(s) the user sent
+    alongside the photo(s); the model decides whether they're relevant to
+    the food (sets "caption_relevant") — see FOOD_VISION_PROMPT.
+
+    Returns None if analysis fails or none of the photos show food/a drink.
     """
     user = db.get_user(user_id)
     api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
@@ -405,26 +476,55 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
     targets = _get_daily_targets(user_id)
     totals_line = ", ".join(f"{k}: {current.get(k, 0)}/{v}" for k, v in targets.items())
 
+    prompt = FOOD_VISION_PROMPT
+
+    if len(images) > 1:
+        prompt += (
+            f"\n\nYou were sent {len(images)} photos together as ONE meal/order — "
+            "treat them as the same eating occasion (different angles of the same "
+            "dish, or several dishes from the same tray/order), not separate meals. "
+            "A photo showing only packaging/a logo/a menu board/the storefront "
+            "(no food itself) contributes nothing to calories/items — see "
+            "RESTAURANT rules."
+        )
+
+    caption_text = " / ".join(c.strip() for c in (captions or []) if c and c.strip())
+    if caption_text:
+        prompt += (
+            f"\n\nThe user sent this text right after the photo(s): \"{caption_text}\"\n"
+            "Add a \"caption_relevant\" boolean field to your JSON response. If the "
+            "text describes what's in the photo(s) — exact ingredients, portion "
+            "count, a correction to what you'd otherwise guess, or the "
+            "restaurant/dish name — set it true and use the text to refine your "
+            "estimate. If it's unrelated (a separate question, small talk, "
+            "something not about this food/drink), set it false and ignore it for "
+            "the estimate."
+        )
+
     # The '*_en' name must be English (used for the Google Health log); the
     # '*_local' name, 'notes', and 'coaching_suggestion' must be in the user's
     # language (for the reply).
-    prompt = FOOD_VISION_PROMPT + (
+    prompt += (
         f"\n\nThe user's language is {language}. Write '*_local' fields, 'notes', and "
-        f"'coaching_suggestion' in {language}. Always keep '*_en' fields in English, "
-        "and keep all JSON keys and the 'type' value exactly as specified in English.\n\n"
+        f"'coaching_suggestion' in {language}. Always keep '*_en'/'name_en' fields in "
+        "English, and keep all JSON keys and the 'type' value exactly as specified "
+        "in English.\n\n"
         f"Already logged today (before this item), vs daily target: {totals_line}"
     )
 
     # Bound the upload. Ordinary LINE photos (<=1.64 MP) are unaffected; this
     # exists so a full-resolution photo arriving through another path can't turn
-    # one meal into a multi-megabyte request.
+    # one meal into a multi-megabyte request — applied per photo since a batch
+    # can carry several.
     from coach.images import VISION_MAX_EDGE, downscale
-    image_bytes = downscale(image_bytes, VISION_MAX_EDGE, mime_type)
-    image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+    image_parts = [
+        genai.types.Part.from_bytes(data=downscale(b, VISION_MAX_EDGE, m), mime_type=m)
+        for b, m in images
+    ]
     try:
         # Shorter budget than scheduled jobs — a person is waiting in chat.
         text = gemini.generate(
-            api_key, contents=[prompt, image_part],
+            api_key, contents=[prompt, *image_parts],
             max_output_tokens=4096, max_wait=180, prefer_accuracy=True,
         )
     except gemini.GeminiUnavailable:
@@ -438,8 +538,15 @@ def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image
     if data and data.get("type") in ("food", "drink"):
         if not data.get("coaching_suggestion"):
             log.warning("vision response missing coaching_suggestion (type=%s)", data.get("type"))
+        _normalize_plate_totals(data)
         return _normalize_names(data)
     return None
+
+
+def analyze_food_image(user_id: str, image_bytes: bytes, mime_type: str = "image/jpeg",
+                       language: str = "English") -> dict | None:
+    """Single-photo convenience wrapper around analyze_food_images()."""
+    return analyze_food_images(user_id, [(image_bytes, mime_type)], language=language)
 
 
 _NAME_FIELDS = ("food_name_en", "food_name_local", "drink_name_en", "drink_name_local")
@@ -465,13 +572,24 @@ def _capitalize_first(name: str) -> str:
     return (first.upper() + name[1:]) if "a" <= first <= "z" else name
 
 
+_ITEM_NAME_FIELDS = ("name_en", "name_local")
+
+
 def _normalize_names(analysis: dict) -> dict:
-    """Capitalise every display-name field in place. Returns the same dict."""
+    """Capitalise every display-name field in place, including each dish of
+    a multi-item plate. Returns the same dict."""
     if isinstance(analysis, dict):
         for field in _NAME_FIELDS:
             value = analysis.get(field)
             if isinstance(value, str):
                 analysis[field] = _capitalize_first(value.strip())
+        for item in analysis.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            for field in _ITEM_NAME_FIELDS:
+                value = item.get(field)
+                if isinstance(value, str):
+                    item[field] = _capitalize_first(value.strip())
     return analysis
 
 
@@ -595,6 +713,39 @@ def log_food_to_health(user_id: str, analysis: dict) -> tuple[bool, str | None]:
         # "⚠️" instead of the real "couldn't save" message (see chat.py).
         log.exception("unexpected error writing nutrition-log to Google Health")
         return False, None
+
+
+def log_food_items_to_health(user_id: str, items: list[dict], meal_type: str | None = None,
+                             time_str: str | None = None, date_str: str | None = None) -> tuple[bool, list[str]]:
+    """Write each dish of a multi-item plate as its own nutrition-log data
+    point (rather than one blended entry), so Google Health — and later
+    deletion/adjustment — sees the plate as separate items.
+
+    Returns (all_synced, resource_names) — all_synced is True only if every
+    item wrote successfully; resource_names holds whichever did, in order,
+    which the caller stores as one log's health_point_names (deletion and
+    scaling already operate on that list generically).
+    """
+    all_synced = True
+    names: list[str] = []
+    for item in items:
+        ok, name = log_food_to_health(user_id, {
+            "food_name_en": item.get("name_en") or item.get("name_local") or "food",
+            "calories_kcal": item.get("calories_kcal", 0),
+            "protein_g": item.get("protein_g", 0),
+            "total_carbohydrate_g": item.get("total_carbohydrate_g", 0),
+            "total_fat_g": item.get("total_fat_g", 0),
+            "meal_type": meal_type,
+            "time": time_str,
+            "date": date_str,
+        })
+        if name:
+            names.append(name)
+        all_synced = all_synced and ok
+    if not all_synced:
+        log.warning("partial failure logging plate items for %s — %d/%d points created",
+                    user_id, len(names), len(items))
+    return all_synced, names
 
 
 def log_hydration_to_health(user_id: str, analysis: dict) -> tuple[bool, str | None]:
@@ -1072,6 +1223,18 @@ def adjust_last_log(user_id: str, params: dict | None,
             scaled[field] = round(_num(original.get(field)) * times, 1)
     scaled["times"] = times
 
+    # A multi-item plate log: scale each dish's own macros by the same
+    # factor, so re-logging below reproduces separate (bigger) data points
+    # per dish instead of collapsing back into one blended entry.
+    plate_items = _plate_items(original)
+    if plate_items:
+        scaled["items"] = [
+            {**it, **{f: round(_num(it.get(f)) * times, 1) for f in
+                      ("calories_kcal", "protein_g", "total_carbohydrate_g", "total_fat_g")
+                      if it.get(f) is not None}}
+            for it in plate_items
+        ]
+
     # Re-log anchored at the ORIGINAL log time (insights.ts is UTC), so the
     # entry doesn't jump to "now" on the Google Health timeline.
     try:
@@ -1106,6 +1269,16 @@ def adjust_last_log(user_id: str, params: dict | None,
             })
             if nutrition_point:
                 new_points.append(nutrition_point)
+    elif scaled.get("items"):
+        synced, food_points = log_food_items_to_health(
+            user_id, scaled["items"], meal_type=_explicit_meal_type(scaled),
+            time_str=scaled.get("time"), date_str=scaled.get("date"),
+        )
+        new_points.extend(food_points)
+        if synced:
+            fluid_point = _log_fluid_for_food(user_id, scaled)
+            if fluid_point:
+                new_points.append(fluid_point)
     else:
         synced, food_point = log_food_to_health(user_id, scaled)
         if food_point:
@@ -1256,42 +1429,171 @@ LABELS = {
 }
 
 
-def handle_food_photo(user_id: str, image_bytes: bytes,
-                      mime_type: str = "image/jpeg") -> tuple[str | FlexReply, int | None]:
-    """Full flow: analyze image → log to Google Health → return a LINE reply.
+# A restaurant search match this many times bigger/smaller than the vision
+# estimate is treated as the wrong menu item rather than a real correction.
+_RESTAURANT_MATCH_SANITY_FACTOR = 6
+
+RESTAURANT_MATCH_NOTE = {
+    # No possessive ('s) on {restaurant} — a name that already ends in "'s"
+    # (McDonald's, Wendy's, ...) would otherwise read "McDonald's's".
+    "en": "(refined using nutrition info published by {restaurant} for \"{item}\")",
+    "th": "(ปรับค่าตามข้อมูลโภชนาการที่ร้าน {restaurant} เผยแพร่ไว้สำหรับ \"{item}\")",
+}
+
+
+def _lookup_restaurant_nutrition(api_key: str, restaurant: str, dish_hint: str) -> dict | None:
+    """Best-effort web search for real nutrition info for a dish at a named
+    restaurant/chain, used to refine a vision-only estimate.
+
+    Returns {"matched_item", "calories_kcal", "protein_g",
+    "total_carbohydrate_g", "total_fat_g"} on a confident match, else None.
+    Never raises — a search failure/timeout must fall back to the vision
+    estimate, not break the log.
+    """
+    prompt = (
+        f"Search the web for real nutrition information for \"{dish_hint}\" at "
+        f"\"{restaurant}\" (a restaurant/food brand). If you find an official or "
+        "reliable match (e.g. the brand's own published nutrition info), respond "
+        "with ONLY this JSON (no markdown, no prose): "
+        '{"found": true, "matched_item": "exact menu item name found", '
+        '"calories_kcal": number, "protein_g": number, '
+        '"total_carbohydrate_g": number, "total_fat_g": number}. '
+        "If you cannot find a confident match for this specific restaurant, "
+        'respond with ONLY {"found": false}.'
+    )
+    try:
+        text = gemini.generate(
+            api_key, contents=[prompt], max_output_tokens=512, max_wait=25,
+            tools=[genai.types.Tool(google_search=genai.types.GoogleSearch())],
+        )
+    except Exception:
+        log.info("restaurant nutrition search failed for %r — keeping vision estimate", restaurant)
+        return None
+    data = _extract_json(text)
+    if data and data.get("found") and _num(data.get("calories_kcal")) > 0:
+        return data
+    return None
+
+
+def _refine_with_restaurant_lookup(user_id: str, analysis: dict, restaurant: str, language: str) -> None:
+    """If a restaurant/brand was identified in the photo(s), best-effort look
+    up its real nutrition info and override the vision-only estimate with it
+    (proportionally rescaling any plate items). Mutates `analysis` in place;
+    never raises, and leaves `analysis` untouched on any failure/uncertainty
+    — a photo log must never regress to "not logged" just because the extra
+    lookup didn't pan out.
+    """
+    user = db.get_user(user_id)
+    api_key = (user.get("gemini_api_key") if user else None) or DEFAULT_GEMINI_KEY
+    dish_hint = analysis.get("food_name_en") or analysis.get("drink_name_en") or ""
+    if not api_key or not dish_hint:
+        return
+    try:
+        found = _lookup_restaurant_nutrition(api_key, restaurant, dish_hint)
+    except Exception:
+        log.exception("restaurant nutrition lookup crashed — keeping vision estimate")
+        return
+    if not found:
+        return
+
+    old_cal = _num(analysis.get("calories_kcal"))
+    new_cal = _num(found.get("calories_kcal"))
+    # A search match this far from the vision estimate is more likely the
+    # wrong menu item (wrong size, wrong dish) than a genuine correction —
+    # same spirit as the Google Health implausibility guard above: an
+    # untrusted external number must earn trust with a sanity bound, not
+    # override a real estimate outright just because it parsed as JSON.
+    if old_cal > 0 and not (old_cal / _RESTAURANT_MATCH_SANITY_FACTOR
+                            <= new_cal <= old_cal * _RESTAURANT_MATCH_SANITY_FACTOR):
+        log.info("restaurant search match for %r (%s kcal) too far from the vision "
+                 "estimate (%s kcal) — likely the wrong menu item, keeping vision estimate",
+                 restaurant, new_cal, old_cal)
+        return
+    scale = (new_cal / old_cal) if old_cal > 0 else None
+
+    for field in ("calories_kcal", "protein_g", "total_carbohydrate_g", "total_fat_g"):
+        if found.get(field) is not None:
+            analysis[field] = _num(found[field])
+
+    items = analysis.get("items")
+    if isinstance(items, list) and scale:
+        # Keep each dish's relative share of the plate, rescaled to the new total.
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            for f in ("calories_kcal", "protein_g", "total_carbohydrate_g", "total_fat_g"):
+                if it.get(f) is not None:
+                    it[f] = round(_num(it[f]) * scale, 1)
+
+    note = RESTAURANT_MATCH_NOTE.get(_lang_code(language), RESTAURANT_MATCH_NOTE["en"]).format(
+        restaurant=restaurant, item=found.get("matched_item") or dish_hint)
+    analysis["notes"] = (f"{analysis['notes']} " if analysis.get("notes") else "") + note
+    log.info("refined estimate for %s using %s menu data (%s)", user_id, restaurant, found.get("matched_item"))
+
+
+def handle_food_photos(user_id: str, images: list[tuple[bytes, str]],
+                       captions: list[str] | None = None
+                       ) -> tuple[str | FlexReply, int | None, str | None]:
+    """Full flow for one or more photos sent together as one meal: analyze →
+    (best-effort) refine via restaurant lookup → log to Google Health →
+    return a LINE reply.
 
     Handles both food (nutrition-log) and drinks (hydration-log).
     Reply language follows the user's stored preference.
-    Returns (reply, insights_rowid_or_None) — reply is a FlexReply (a log
-    confirmation card, with the analyzed photo as its hero image) when the
-    analysis produced a real log, or a plain str for apology/error cases
-    (unclear photo, empty portion, AI unavailable). The rowid lets the
-    caller map the sent confirmation message for later quote-replies.
+    Returns (reply, insights_rowid_or_None, leftover_caption_or_None):
+    - reply is a FlexReply (a log confirmation card, with the first photo as
+      hero image) when the analysis produced a real log, or a plain str for
+      apology/error cases (unclear photo, empty portion, AI unavailable).
+    - leftover_caption is any caption text the model judged NOT relevant to
+      the food (or all of it, if analysis never got that far) — the caller
+      should route it through normal chat instead of discarding it.
     """
     db.init_db()
 
     language = _get_language(user_id)
     labels = LABELS.get(_lang_code(language), LABELS["en"])
+    caption_text = " / ".join(c.strip() for c in (captions or []) if c and c.strip()) or None
 
     try:
-        analysis = analyze_food_image(user_id, image_bytes, mime_type, language=language)
+        analysis = analyze_food_images(user_id, images, captions, language=language)
     except gemini.GeminiQuotaExhausted:
-        return labels["quota_exhausted"], None
+        return labels["quota_exhausted"], None, caption_text
     except gemini.GeminiUnavailable:
-        return labels["ai_busy"], None
+        return labels["ai_busy"], None, caption_text
     if not analysis or analysis.get("type") not in ("food", "drink"):
-        return labels["unclear"], None
+        return labels["unclear"], None, caption_text
+
+    # Caption is "used up" only when the model explicitly says it informed
+    # the estimate — anything else (no caption, or explicitly irrelevant)
+    # gets forwarded to normal chat by the caller so nothing is dropped.
+    leftover_caption = caption_text if (caption_text and analysis.get("caption_relevant") is not True) else None
+
+    restaurant = str(analysis.get("restaurant_hint") or "").strip()
+    if restaurant:
+        _refine_with_restaurant_lookup(user_id, analysis, restaurant, language)
 
     image_url = None
     try:
         from coach.images import save_temp_image, temp_image_url
-        image_url = temp_image_url(save_temp_image(image_bytes, mime_type))
+        # Hero photo: the first one sent (typically the food itself; a
+        # storefront/logo photo, if any, is usually sent as a follow-up).
+        hero_bytes, hero_mime = images[0]
+        image_url = temp_image_url(save_temp_image(hero_bytes, hero_mime))
     except Exception:
         log.exception("failed to save temp image for flex hero — continuing without it")
 
     if analysis["type"] == "drink":
-        return _handle_drink(user_id, analysis, labels, image_url=image_url)
-    return _handle_food(user_id, analysis, labels, image_url=image_url)
+        reply, rowid = _handle_drink(user_id, analysis, labels, image_url=image_url)
+    else:
+        reply, rowid = _handle_food(user_id, analysis, labels, image_url=image_url)
+    return reply, rowid, leftover_caption
+
+
+def handle_food_photo(user_id: str, image_bytes: bytes,
+                      mime_type: str = "image/jpeg") -> tuple[str | FlexReply, int | None]:
+    """Single-photo convenience wrapper around handle_food_photos()."""
+    reply, rowid, _ = handle_food_photos(user_id, [(image_bytes, mime_type)])
+    return reply, rowid
 
 
 def _handle_food(user_id: str, analysis: dict, labels: dict,
@@ -1303,11 +1605,24 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         log.info("food calories is 0 — skipping nutrition log")
         return labels["empty_food"], None
 
-    synced, point_name = log_food_to_health(user_id, analysis)
-    fluid_point = _log_fluid_for_food(user_id, analysis)
+    items = _plate_items(analysis)
+    if items:
+        synced, point_names = log_food_items_to_health(
+            user_id, items, meal_type=_explicit_meal_type(analysis),
+            time_str=analysis.get("time"), date_str=analysis.get("date"),
+        )
+    else:
+        synced, point_name = log_food_to_health(user_id, analysis)
+        point_names = [point_name] if point_name else []
+    # The plate's liquid portion (e.g. a bowl of soup alongside the other
+    # dishes), if any, regardless of whether it also has itemized dishes.
+    if synced:
+        fluid_point = _log_fluid_for_food(user_id, analysis)
+        if fluid_point:
+            point_names.append(fluid_point)
     rowid = _store_food_log(
         user_id,
-        {**analysis, "health_point_names": [n for n in (point_name, fluid_point) if n]},
+        {**analysis, "items": items, "health_point_names": point_names},
         synced,
     )
 
@@ -1323,9 +1638,16 @@ def _handle_food(user_id: str, analysis: dict, labels: dict,
         (labels["carbs"], f"{carbs} g"),
         (labels["fat"], f"{fat} g"),
     ]
+    item_rows = None
+    if items:
+        item_rows = [
+            (it.get("name_local") or it.get("name_en") or "-",
+             f"{round(_num(it.get('calories_kcal')))} kcal")
+            for it in items
+        ]
     bubble = build_log_bubble(
         name=name, kicker=labels["kicker_food"], accent_color=COLOR_FOOD,
-        highlight=("🔥", f"{cal} kcal"), rows=rows,
+        highlight=("🔥", f"{cal} kcal"), rows=rows, items=item_rows,
         notes=analysis.get("notes"),
         synced=synced,
         sync_label=labels["synced"] if synced else labels["not_synced"],

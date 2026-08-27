@@ -189,11 +189,16 @@ def generate(
     max_output_tokens: int = 2048,
     max_wait: int | None = None,
     min_chars: int = 1,
+    tools: list | None = None,
     prefer_accuracy: bool = False,
 ) -> str:
     """Generate content, retrying across models until success or timeout.
 
     contents: str or list (list supports multimodal, e.g. [prompt, image_part])
+    tools: optional list of genai.types.Tool (e.g. Google Search grounding),
+    passed straight through to every model tried — omit for the normal
+    ungrounded call every other caller uses.
+    prefer_accuracy: try GEMINI_ACCURACY_MODEL first — see its use below.
     Returns the response text. Raises GeminiQuotaExhausted when the key's
     daily quota is spent on every model, GeminiUnavailable otherwise.
     """
@@ -219,6 +224,8 @@ def generate(
             cfg_kwargs["thinking_config"] = thinking
         if system_instruction:
             cfg_kwargs["system_instruction"] = system_instruction
+        if tools:
+            cfg_kwargs["tools"] = tools
         return genai.types.GenerateContentConfig(**cfg_kwargs)
 
     def _try_model(model: str):
