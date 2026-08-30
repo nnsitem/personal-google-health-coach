@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse
 from linebot.v3.messaging import TextMessage
 
 from coach import db
+from coach import gemini
 from coach.config import LINE_CHANNEL_SECRET, TZ
 from coach.config import DAILY_SUMMARY_HOUR, DAILY_SUMMARY_MINUTE
 from coach.chat import handle_message
@@ -707,14 +708,14 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
     the user's short-lived photo batch (see _touch_photo_batch) rather than
     analyzing immediately, so photos sent together — or a caption text sent
     right after — are logged as one meal instead of separately."""
-    from coach.line import get_image_content
+    from coach.line import get_message_content
 
     # Require full setup before touching the user's Gemini key / Google token
     if not _ensure_configured(user_id, db.get_user(user_id), reply_token):
         return
 
     try:
-        image_bytes = get_image_content(message_id)
+        image_bytes = get_message_content(message_id)
         mime = _detect_image_mime(image_bytes)
     except Exception:
         log.exception("failed to download photo %s", message_id)
@@ -727,6 +728,52 @@ def _process_image_message(user_id: str, message_id: str, reply_token: str | Non
     log.info("LINE image from %s (id=%s) — added to photo batch", user_id, message_id)
     _touch_photo_batch(user_id, create=True, image=(image_bytes, mime),
                        message_id=message_id, reply_token=reply_token)
+
+
+def _process_audio_message(user_id: str, message_id: str, reply_token: str | None = None) -> None:
+    """Handle a voice message: transcribe it with Gemini, echo back what was
+    heard (a reply token is free and single-use, so this consumes it — the
+    coach's actual answer goes out as a push, same as _process_text_message's
+    own fallback), then run the transcript through the exact same pipeline as
+    a typed message. This is deliberately NOT a separate voice-specific path —
+    "log a banana" said out loud must behave identically to typing it,
+    including help/login/set-key commands and directive parsing."""
+    from coach.line import get_message_content
+    from coach.chat import transcribe_voice_message
+
+    user = db.get_user(user_id)
+    if not _ensure_configured(user_id, user, reply_token):
+        return
+
+    try:
+        audio_bytes = get_message_content(message_id)
+    except Exception:
+        log.exception("failed to download voice message %s", message_id)
+        try:
+            _send(user_id, "Sorry, I couldn't download that voice message. Please try again. 🙏", reply_token)
+        except Exception:
+            pass
+        return
+
+    try:
+        transcript = transcribe_voice_message(user["gemini_api_key"], audio_bytes)
+    except gemini.GeminiQuotaExhausted:
+        _send(user_id, "⛔ Your Gemini AI key has used up its free daily quota, so I "
+                       "can't transcribe voice messages right now.", reply_token)
+        return
+    except gemini.GeminiUnavailable:
+        _send(user_id, "Sorry, I'm having trouble connecting right now. Try again in "
+                       "a moment, or type it instead! 🙏", reply_token)
+        return
+
+    if not transcript:
+        _send(user_id, "🎤 I couldn't make out any speech in that voice message. "
+                       "Please try again, or type it instead.", reply_token)
+        return
+
+    log.info("transcribed voice from %s (id=%s): %s", user_id, message_id, transcript)
+    _send(user_id, f"🎤 Heard: \"{transcript}\"", reply_token)
+    _process_text_message(user_id, transcript, reply_token=None, inbound_message_id=message_id)
 
 
 @app.post("/webhook")
@@ -783,6 +830,8 @@ async def line_webhook(request: Request, background_tasks: BackgroundTasks):
                                       msg.get("id"))
         elif msg_type == "image":
             background_tasks.add_task(_process_image_message, user_id, msg.get("id", ""), reply_token)
+        elif msg_type == "audio":
+            background_tasks.add_task(_process_audio_message, user_id, msg.get("id", ""), reply_token)
 
     return {"ok": True}
 

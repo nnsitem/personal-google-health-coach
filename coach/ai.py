@@ -147,15 +147,15 @@ def build_daily_snapshot(user_id: str) -> dict:
         for row in exercise_rows
     ]
 
-    # Load coach memory for personalization
-    with db.connect() as conn:
-        memory_rows = conn.execute(
-            "SELECT name, content FROM coach_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 10",
-            (user_id,),
-        ).fetchall()
-
+    # Load coach memory for personalization, grouped by category (injury/diet/
+    # goal/preference/general) so the narrative can weigh e.g. an injury or
+    # dietary fact deterministically instead of picking it out of a flat list.
+    memory_rows = db.get_coach_memory(user_id, limit=10)
     if memory_rows:
-        snapshot["coach_memory"] = {row["name"]: row["content"] for row in memory_rows}
+        grouped_memory: dict[str, dict[str, str]] = {}
+        for row in memory_rows:
+            grouped_memory.setdefault(row["category"] or "general", {})[row["name"]] = row["content"]
+        snapshot["coach_memory"] = grouped_memory
 
     # Load active goals
     with db.connect() as conn:

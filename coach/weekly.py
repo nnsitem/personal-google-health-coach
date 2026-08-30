@@ -21,10 +21,10 @@ log = logging.getLogger(__name__)
 
 WEEKLY_SYSTEM_PROMPT = """\
 You are a personal health coach writing the "Key Insight" narrative for a
-weekly report delivered via LINE. The user's weekly numbers — a 7-day steps
-chart and their step / sleep / resting-HR / active-minute averages with
-week-over-week trends — are ALREADY shown to them as visual cards above your
-text. So do NOT restate totals or list metrics back.
+weekly report delivered via LINE. The user's weekly numbers — 7-day steps and
+sleep bar charts, and their step / sleep / resting-HR / active-minute
+averages with week-over-week trends — are ALREADY shown to them as visual
+cards above your text. So do NOT restate totals or list metrics back.
 
 Write 3-5 short sentences that:
 1. Open with one line of genuine encouragement grounded in the week.
@@ -198,13 +198,29 @@ def _weekly_view_model(user_id: str, snapshot: dict, labels: dict) -> dict:
     today = datetime.now(tz).date()
     daily = snapshot.get("daily_metrics", {})
 
+    def tick(d) -> str:
+        # Compact axis tick: English first-letter, Thai short weekday (no dot).
+        t = labels["weekdays"][d.weekday()].rstrip(".")
+        return t[0] if labels is REPORT_LABELS["en"] else t
+
     steps_series: list[tuple[str, float]] = []
     for i in range(7, 0, -1):
         d = today - timedelta(days=i)
         steps = (daily.get(d.isoformat()) or {}).get("steps", 0) or 0
-        # Compact axis tick: English first-letter, Thai short weekday (no dot).
-        tick = labels["weekdays"][d.weekday()].rstrip(".")
-        steps_series.append((tick[0] if labels is REPORT_LABELS["en"] else tick, steps))
+        steps_series.append((tick(d), steps))
+
+    # A day can have more than one sleep session (e.g. a nap) — summed under
+    # its start date, same as how the daily brief's own sleep total works.
+    sleep_hours_by_date: dict[str, float] = {}
+    for session in snapshot.get("sleep_sessions", []):
+        sleep_hours_by_date[session["date"]] = (
+            sleep_hours_by_date.get(session["date"], 0) + session["total_hours"]
+        )
+
+    sleep_series: list[tuple[str, float]] = []
+    for i in range(7, 0, -1):
+        d = today - timedelta(days=i)
+        sleep_series.append((tick(d), sleep_hours_by_date.get(d.isoformat(), 0) or 0))
 
     def avg_row(label, metric, fmt, higher_is_better):
         m = trends.get(metric) or {}
@@ -223,6 +239,7 @@ def _weekly_view_model(user_id: str, snapshot: dict, labels: dict) -> dict:
     return {
         "range_label": _fmt_range(snapshot.get("week_range", ""), labels),
         "steps_series": steps_series,
+        "sleep_series": sleep_series,
         "average_rows": average_rows,
     }
 
@@ -252,6 +269,7 @@ def run_weekly_report(user_id: str) -> str:
             color=COLOR_WEEKLY,
             range_label=vm["range_label"],
             steps_series=vm["steps_series"],
+            sleep_series=vm["sleep_series"],
             average_rows=vm["average_rows"],
             narrative=message,
             labels=labels,

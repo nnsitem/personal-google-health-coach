@@ -110,8 +110,9 @@ def _sent_ids(resp) -> list[str]:
     return [m.id for m in sent if getattr(m, "id", None)]
 
 
-def get_image_content(message_id: str) -> bytes:
-    """Download the binary content of an image message from LINE."""
+def get_message_content(message_id: str) -> bytes:
+    """Download the binary content of an image, audio, video, or file message
+    from LINE (whatever type — the endpoint itself is type-agnostic)."""
     if not LINE_CHANNEL_ACCESS_TOKEN:
         raise LineError("LINE_CHANNEL_ACCESS_TOKEN not set in .env")
     configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)

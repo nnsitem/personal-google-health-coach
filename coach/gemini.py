@@ -182,6 +182,31 @@ def _warn_if_truncated(model: str, response, max_output_tokens: int) -> None:
         pass
 
 
+def _log_cache_usage(model: str, response) -> None:
+    """Debug-log whether this call hit Gemini's implicit prompt cache.
+
+    Implicit caching is automatic for 2.5+/3.x models — no code needed to enable
+    it — but only credits once the repeated prefix clears a per-model minimum
+    (2,048 tokens on 2.5 models, 4,096 on 3.x). Logging this tells us whether it's
+    actually firing before spending effort on prompt restructuring or explicit
+    (paid-storage) caching.
+    """
+    try:
+        usage = getattr(response, "usage_metadata", None)
+        if usage is None:
+            return
+        cached = getattr(usage, "cached_content_token_count", None)
+        prompt = getattr(usage, "prompt_token_count", None)
+        if cached:
+            log.debug("model %s cache HIT — %d/%s prompt tokens served from cache",
+                       model, cached, prompt)
+        else:
+            log.debug("model %s cache MISS — %s prompt tokens, no cache credit",
+                       model, prompt)
+    except Exception:  # diagnostics must never break generation
+        pass
+
+
 def generate(
     api_key: str,
     contents,
@@ -245,6 +270,7 @@ def generate(
                 )
                 text = response.text
                 _warn_if_truncated(model, response, max_output_tokens)
+                _log_cache_usage(model, response)
                 return text if (text and len(text.strip()) >= min_chars) else None
             except Exception as e:
                 msg = str(e).lower()

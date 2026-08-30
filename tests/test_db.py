@@ -93,5 +93,52 @@ class Prune(unittest.TestCase):
         self.assertEqual(rows, {"FRESH-MID"})
 
 
+class CoachMemory(unittest.TestCase):
+    """db.get_coach_memory — the shared read used by chat.py (context + the
+    'language' lookup), ai.py (daily brief), and food.py (diet facts), so the
+    category column has one query to keep in sync instead of three."""
+
+    def setUp(self):
+        self.uid = support.new_user()
+
+    def _save(self, name, content, category=None):
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO coach_memory (user_id, name, content, category, updated_at) "
+                "VALUES (?, ?, ?, ?, datetime('now'))",
+                (self.uid, name, content, category),
+            )
+
+    def test_returns_name_content_and_category(self):
+        self._save("allergy", "peanuts", "diet")
+        rows = db.get_coach_memory(self.uid)
+        self.assertEqual(rows, [{"name": "allergy", "content": "peanuts", "category": "diet"}])
+
+    def test_uncategorized_entries_have_none_category(self):
+        self._save("favorite_snack", "mango")
+        rows = db.get_coach_memory(self.uid)
+        self.assertIsNone(rows[0]["category"])
+
+    def test_category_filter_is_case_insensitive_and_excludes_others(self):
+        self._save("allergy", "peanuts", "diet")
+        self._save("target_weight", "70kg", "goal")
+        rows = db.get_coach_memory(self.uid, category="DIET")
+        self.assertEqual([r["name"] for r in rows], ["allergy"])
+
+    def test_uncategorized_entries_are_excluded_when_filtering(self):
+        self._save("favorite_snack", "mango")
+        self.assertEqual(db.get_coach_memory(self.uid, category="diet"), [])
+
+    def test_another_users_memory_is_never_returned(self):
+        other = support.new_user()
+        self._save("allergy", "peanuts", "diet")
+        self.assertEqual(db.get_coach_memory(other), [])
+
+    def test_limit_is_honored(self):
+        for i in range(5):
+            self._save(f"fact{i}", str(i))
+        self.assertEqual(len(db.get_coach_memory(self.uid, limit=2)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
