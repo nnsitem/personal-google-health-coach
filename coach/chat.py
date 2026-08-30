@@ -49,7 +49,9 @@ Always complete your sentences — never stop mid-thought.
 Keep replies to 3-5 sentences for casual chat, more only when asked for detail.
 
 Special abilities (use these directives on their own line at the END of your reply):
-- To save a fact/preference: [MEMORY: key = value]
+- To save a fact/preference: [MEMORY: key = value]. When it clearly fits one of
+  these, prefix the key: injury:, diet:, goal:, preference: (e.g.
+  [MEMORY: diet:allergy = peanuts]) — otherwise just use a plain key.
 - To set or update daily nutrition/hydration targets when the user asks (e.g. "ตั้งเป้า 1800 kcal",
   "set my protein target to 150g", "change water goal to 2500ml"):
   [SET_NUTRITION_TARGETS: {"kcal": 1800, "protein_g": 150, "fat_g": 65, "carbs_g": 250, "water_ml": 2500}]
@@ -279,13 +281,10 @@ def _get_goals(user_id: str) -> dict:
 
 
 def _get_coach_memory(user_id: str) -> dict:
-    """Load coach memory (preferences, facts about the user)."""
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT name, content FROM coach_memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20",
-            (user_id,),
-        ).fetchall()
-    return {row["name"]: row["content"] for row in rows}
+    """Load coach memory as a flat name->content map (e.g. the 'language'
+    lookup elsewhere expects this shape). _build_context_message groups the
+    same rows by category separately, for the chat prompt."""
+    return {m["name"]: m["content"] for m in db.get_coach_memory(user_id)}
 
 
 def _get_chat_history(user_id: str, limit: int = 20) -> list[dict]:
@@ -321,16 +320,26 @@ def save_goal(user_id: str, key: str, value) -> None:
         )
 
 
-def save_memory(user_id: str, name: str, content: str) -> None:
-    """Save or update a coach memory entry."""
+# Recognized [MEMORY: category:key = value] tags. Not exhaustive by design —
+# an unrecognized or absent prefix just leaves category NULL, exactly like
+# before this existed. See _build_context_message for how these get grouped,
+# and coach.food for the "diet" category's deterministic use in food logging.
+MEMORY_CATEGORIES = ("injury", "diet", "goal", "preference", "general")
+
+
+def save_memory(user_id: str, name: str, content: str, category: str | None = None) -> None:
+    """Save or update a coach memory entry, optionally tagged with a category
+    for grouping/deterministic injection elsewhere (see MEMORY_CATEGORIES).
+    category=None (the default) behaves exactly as before it existed."""
     with db.connect() as conn:
         conn.execute(
             """
-            INSERT INTO coach_memory (user_id, name, content, updated_at)
-            VALUES (?, ?, ?, datetime('now'))
-            ON CONFLICT(user_id, name) DO UPDATE SET content = excluded.content, updated_at = datetime('now')
+            INSERT INTO coach_memory (user_id, name, content, category, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(user_id, name) DO UPDATE SET
+                content = excluded.content, category = excluded.category, updated_at = datetime('now')
             """,
-            (user_id, name, content),
+            (user_id, name, content, category),
         )
 
 
@@ -392,7 +401,7 @@ def _build_context_message(user_id: str) -> str:
     tz = db.user_tz(db.get_user(user_id))
     now = datetime.now(tz)
     goals = _get_goals(user_id)
-    memory = _get_coach_memory(user_id)
+    memory_rows = db.get_coach_memory(user_id)
 
     # The model reasons about "today" from this line; the server's clock is not
     # the user's once anyone signs up outside the server's timezone.
@@ -440,8 +449,18 @@ def _build_context_message(user_id: str) -> str:
 
     if goals:
         parts.append(f"User goals: {json.dumps(goals, separators=(',', ':'))}")
-    if memory:
-        parts.append(f"Coach memory: {json.dumps(memory, separators=(',', ':'))}")
+    if memory_rows:
+        # Grouped by category (falling back to "general") rather than one flat
+        # list, so injury/diet facts stand out instead of blending into
+        # whatever else the user has asked the coach to remember.
+        grouped_memory: dict[str, dict[str, str]] = {}
+        for row in memory_rows:
+            grouped_memory.setdefault(row["category"] or "general", {})[row["name"]] = row["content"]
+        parts.append(
+            "Coach memory (grouped by category — pay special attention to "
+            f"'injury'/'diet' entries, they should shape any food/exercise advice): "
+            f"{json.dumps(grouped_memory, separators=(',', ':'), ensure_ascii=False)}"
+        )
 
     # Include active workout plan if one exists
     plan = get_current_plan(user_id)
@@ -609,6 +628,47 @@ def _extract_log_fallback(user_id: str, user_text: str, api_key: str) -> list[tu
             kind = "drink" if (item.get("volume_ml") or item.get("drink_name_en")) else "food"
         out.append((kind, {k: v for k, v in item.items() if k != "kind"}))
     return out
+
+
+_TRANSCRIBE_PROMPT = (
+    "Transcribe this audio message verbatim, in the language it was spoken. "
+    "Output ONLY the transcript text — no preamble, no translation, no quotes "
+    "around it. If the audio is silent, unintelligible, or contains no speech, "
+    "output exactly: [NO_SPEECH]"
+)
+
+
+def transcribe_voice_message(api_key: str, audio_bytes: bytes,
+                             mime_type: str = "audio/mp4") -> str | None:
+    """Transcribe a LINE voice message with Gemini.
+
+    LINE only sends user-recorded voice messages as M4A — mime_type defaults
+    to "audio/mp4" (the correct type for that container; some tooling
+    misidentifies M4A as video/mp4, but Gemini's audio understanding accepts
+    it directly, no separate speech-to-text model needed).
+
+    Returns the transcript, or None if there's nothing usable to transcribe
+    (silent/unintelligible clip) — callers should tell the user rather than
+    silently guessing. Raises GeminiUnavailable/GeminiQuotaExhausted so
+    callers can give the same honest "try again"/"quota exhausted" message
+    used elsewhere instead of masking a capacity outage as "no speech".
+    """
+    from google import genai
+    audio_part = genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+    try:
+        text = gemini.generate(
+            api_key, contents=[_TRANSCRIBE_PROMPT, audio_part],
+            max_output_tokens=1024, max_wait=60, min_chars=1,
+        )
+    except gemini.GeminiUnavailable:
+        raise
+    except Exception:
+        log.exception("voice transcription failed")
+        return None
+    text = (text or "").strip()
+    if not text or text == "[NO_SPEECH]":
+        return None
+    return text
 
 
 def handle_message(user_id: str, user_text: str,
@@ -1008,8 +1068,17 @@ def _process_directives(user_id: str, text: str) -> tuple[str, str | None, str |
             if "=" in inner:
                 key, value = inner.split("=", 1)
                 key, value = key.strip(), value.strip()
-                save_memory(user_id, key, value)
-                log.info("saved memory: %s = %s", key, value)
+                # Optional "category:key" prefix (e.g. "diet:allergy") — only
+                # honored when the prefix is a recognized category, so a key
+                # that legitimately contains ":" for some other reason isn't
+                # silently split apart.
+                category = None
+                if ":" in key:
+                    prefix, rest = key.split(":", 1)
+                    if prefix.strip().lower() in MEMORY_CATEGORIES and rest.strip():
+                        category, key = prefix.strip().lower(), rest.strip()
+                save_memory(user_id, key, value, category=category)
+                log.info("saved memory: %s = %s (category=%s)", key, value, category)
                 # Mirror the language preference onto the users column so
                 # non-chat modules (food replies, etc.) see it too.
                 if key.lower() == "language" and value:

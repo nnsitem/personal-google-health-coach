@@ -487,6 +487,19 @@ def analyze_food_images(user_id: str, images: list[tuple[bytes, str]],
 
     prompt = FOOD_VISION_PROMPT
 
+    # Diet-tagged coach memory (allergies/restrictions the user has mentioned
+    # in chat, e.g. "[MEMORY: diet:allergy = peanuts]") — injected explicitly
+    # rather than left for the model to notice on its own, since missing an
+    # allergy here is a worse failure than missing an ordinary preference.
+    diet_facts = db.get_coach_memory(user_id, category="diet")
+    if diet_facts:
+        facts_line = "; ".join(f"{m['name']}: {m['content']}" for m in diet_facts)
+        prompt += (
+            f"\n\nKnown dietary facts about this user (from earlier conversations) — "
+            f"factor these into your notes/coaching_suggestion when relevant, "
+            f"especially any allergy or restriction: {facts_line}"
+        )
+
     if len(images) > 1:
         prompt += (
             f"\n\nYou were sent {len(images)} photos together as ONE meal/order — "

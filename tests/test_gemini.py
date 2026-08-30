@@ -6,6 +6,7 @@ an hour later, by which time the LINE reply token had expired — which is what
 "no reply" and "much slower than before" actually were.
 """
 
+import logging
 import time
 import unittest
 
@@ -121,6 +122,103 @@ class ThinkingLadder(unittest.TestCase):
     def test_starts_at_the_configured_level_then_degrades(self):
         self.assertEqual(gemini._THINKING_LADDER[0], GEMINI_THINKING_LEVEL)
         self.assertIsNone(gemini._THINKING_LADDER[-1])
+
+
+class FakeUsage:
+    def __init__(self, cached=None, prompt=100):
+        self.cached_content_token_count = cached
+        self.prompt_token_count = prompt
+
+
+class FakeResponse:
+    """Minimal stand-in for a genai GenerateContentResponse."""
+    def __init__(self, text="ok", usage_metadata=None, candidates=None):
+        self.text = text
+        self.usage_metadata = usage_metadata
+        self.candidates = candidates if candidates is not None else []
+
+
+class CacheUsageLogging(unittest.TestCase):
+    """coach.gemini._log_cache_usage — added 2026-08-28 to tell whether Gemini's
+    implicit prompt caching is actually firing, before spending effort on
+    prompt restructuring or explicit (paid) caching. Must be a pure diagnostic:
+    it can never affect the returned text and can never raise, since it runs
+    on every successful call in production."""
+
+    def setUp(self):
+        # tests/__init__.py disables logging below CRITICAL suite-wide (on
+        # purpose, so a passing run stays quiet) — assertLogs needs it back on
+        # to see anything, so lift it for just this class and restore after.
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.CRITICAL)
+
+    def test_logs_hit_when_tokens_were_cached(self):
+        response = FakeResponse(usage_metadata=FakeUsage(cached=80, prompt=100))
+        with self.assertLogs(gemini.log, level="DEBUG") as cm:
+            gemini._log_cache_usage("gemini-pro-latest", response)
+        self.assertTrue(any("cache HIT" in line for line in cm.output))
+        self.assertTrue(any("80" in line and "100" in line for line in cm.output))
+
+    def test_logs_miss_when_nothing_was_cached(self):
+        response = FakeResponse(usage_metadata=FakeUsage(cached=None, prompt=50))
+        with self.assertLogs(gemini.log, level="DEBUG") as cm:
+            gemini._log_cache_usage("gemini-pro-latest", response)
+        self.assertTrue(any("cache MISS" in line for line in cm.output))
+
+    def test_logs_miss_when_cached_count_is_zero(self):
+        # 0 is falsy like None — both mean "no cache credit", not an error.
+        response = FakeResponse(usage_metadata=FakeUsage(cached=0, prompt=50))
+        with self.assertLogs(gemini.log, level="DEBUG") as cm:
+            gemini._log_cache_usage("gemini-pro-latest", response)
+        self.assertTrue(any("cache MISS" in line for line in cm.output))
+
+    def test_no_crash_when_usage_metadata_is_missing(self):
+        # Response objects from an older/mocked SDK build may not carry it at all.
+        response = FakeResponse(usage_metadata=None)
+        gemini._log_cache_usage("gemini-pro-latest", response)  # must not raise
+
+    def test_no_crash_on_a_malformed_response_object(self):
+        # Diagnostics must never break generation — even a response shape the
+        # SDK never actually produces must be swallowed, not propagated.
+        class Explodes:
+            @property
+            def usage_metadata(self):
+                raise RuntimeError("boom")
+
+        gemini._log_cache_usage("gemini-pro-latest", Explodes())  # must not raise
+
+
+class CacheLoggingDoesNotAffectGeneration(unittest.TestCase):
+    """End-to-end: adding the cache-usage log line must not change generate()'s
+    behavior or output, whether or not the fake SDK response carries usage
+    metadata at all."""
+
+    def setUp(self):
+        gemini._cooldown_until.clear()
+        self.addCleanup(gemini._cooldown_until.clear)
+
+    def _patch_client(self, response):
+        class Fake:
+            class models:
+                @staticmethod
+                def generate_content(**kwargs):
+                    return response
+
+        real = gemini.genai.Client
+        gemini.genai.Client = lambda **kwargs: Fake()
+        self.addCleanup(setattr, gemini.genai, "Client", real)
+
+    def test_reply_unaffected_when_cache_hit(self):
+        self._patch_client(FakeResponse(
+            text="hello from the coach",
+            usage_metadata=FakeUsage(cached=80, prompt=100),
+        ))
+        self.assertEqual(gemini.generate("k", contents="hi", max_wait=1),
+                          "hello from the coach")
+
+    def test_reply_unaffected_when_no_usage_metadata_at_all(self):
+        self._patch_client(FakeResponse(text="hello", usage_metadata=None))
+        self.assertEqual(gemini.generate("k", contents="hi", max_wait=1), "hello")
 
 
 if __name__ == "__main__":

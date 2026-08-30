@@ -8,7 +8,7 @@ nothing reached Google Health while the user was told it had.
 import json
 import unittest
 
-from coach import chat
+from coach import chat, db
 from tests import support
 
 
@@ -110,6 +110,49 @@ class DirectiveSideEffects(unittest.TestCase):
         uid = support.new_user()
         chat._process_directives(uid, "noted [MEMORY: language = Thai]")
         self.assertEqual(chat._get_coach_memory(uid).get("language"), "Thai")
+
+    def test_recognized_category_prefix_is_split_off(self):
+        uid = support.new_user()
+        chat._process_directives(uid, "noted [MEMORY: diet:allergy = peanuts]")
+        rows = db.get_coach_memory(uid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "allergy")
+        self.assertEqual(rows[0]["content"], "peanuts")
+        self.assertEqual(rows[0]["category"], "diet")
+        # The flat lookup (used for the 'language' special case) sees the
+        # stripped name, not "diet:allergy".
+        self.assertEqual(chat._get_coach_memory(uid).get("allergy"), "peanuts")
+
+    def test_unrecognized_prefix_is_kept_as_part_of_the_key(self):
+        # Only a KNOWN category prefix is split off — a key that legitimately
+        # contains ":" for some other reason must not be silently mangled.
+        uid = support.new_user()
+        chat._process_directives(uid, "noted [MEMORY: ratio:2 = 1]")
+        rows = db.get_coach_memory(uid)
+        self.assertEqual(rows[0]["name"], "ratio:2")
+        self.assertIsNone(rows[0]["category"])
+
+    def test_plain_key_has_no_category(self):
+        uid = support.new_user()
+        chat._process_directives(uid, "noted [MEMORY: favorite_snack = mango]")
+        rows = db.get_coach_memory(uid)
+        self.assertIsNone(rows[0]["category"])
+
+    def test_category_filter_excludes_other_categories(self):
+        uid = support.new_user()
+        chat.save_memory(uid, "allergy", "peanuts", category="diet")
+        chat.save_memory(uid, "target_weight", "70kg", category="goal")
+        chat.save_memory(uid, "favorite_snack", "mango")
+        diet_only = db.get_coach_memory(uid, category="diet")
+        self.assertEqual([m["name"] for m in diet_only], ["allergy"])
+
+    def test_context_message_groups_memory_by_category(self):
+        uid = support.new_user()
+        chat.save_memory(uid, "allergy", "peanuts", category="diet")
+        chat.save_memory(uid, "favorite_snack", "mango")
+        context = chat._build_context_message(uid)
+        self.assertIn('"diet":{"allergy":"peanuts"}', context)
+        self.assertIn('"general":{"favorite_snack":"mango"}', context)
 
     def test_valid_targets_are_saved(self):
         uid = support.new_user()

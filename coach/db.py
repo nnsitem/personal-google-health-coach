@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS coach_memory (
     user_id    TEXT NOT NULL DEFAULT '',
     name       TEXT NOT NULL,
     content    TEXT NOT NULL,
+    category   TEXT,                    -- optional tag: injury/diet/goal/preference/general
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, name)
 );
@@ -154,6 +155,7 @@ _ADD_COLUMNS = [
     ("goals", "user_id TEXT NOT NULL DEFAULT ''"),
     ("chat_messages", "user_id TEXT NOT NULL DEFAULT ''"),
     ("coach_memory", "user_id TEXT NOT NULL DEFAULT ''"),
+    ("coach_memory", "category TEXT"),
     ("sync_log", "user_id TEXT NOT NULL DEFAULT ''"),
 ]
 
@@ -247,6 +249,7 @@ _PK_REBUILD = {
                 user_id    TEXT NOT NULL DEFAULT '',
                 name       TEXT NOT NULL,
                 content    TEXT NOT NULL,
+                category   TEXT,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (user_id, name)
             )
@@ -531,6 +534,29 @@ def get_user_language(user_id: str) -> str:
     if user and user.get("language"):
         return user["language"]
     return "English"
+
+
+def get_coach_memory(user_id: str, category: str | None = None, limit: int = 20) -> list[dict]:
+    """Coach memory entries (facts/preferences the model asked to remember),
+    newest first. Shared by chat.py (chat context + writes), ai.py (daily
+    brief) and food.py (diet facts) so the category column has one query to
+    keep in sync, not three.
+
+    `category` filters to one tag (e.g. "diet") — for deterministically
+    injecting a specific slice of memory into a prompt (allergies into food
+    logging) instead of relying on the model noticing it in a long flat list.
+    Uncategorized entries (category NULL) are excluded when filtering.
+    """
+    query = "SELECT name, content, category FROM coach_memory WHERE user_id = ?"
+    params: list = [user_id]
+    if category:
+        query += " AND lower(category) = ?"
+        params.append(category.lower())
+    query += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
+    with connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [{"name": r["name"], "content": r["content"], "category": r["category"]} for r in rows]
 
 
 def insight_sent_today(user_id: str, kind: str, tz) -> bool:

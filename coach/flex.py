@@ -55,6 +55,7 @@ REPORT_LABELS = {
         "activity": "🚶 ACTIVITY",
         "todays_focus": "🎯 TODAY'S FOCUS",
         "steps_7day": "🚶 STEPS · 7-DAY",
+        "sleep_7day": "🛌 SLEEP · 7-DAY",
         "weekly_averages": "📈 WEEKLY AVERAGES",
         "key_insight": "💡 KEY INSIGHT",
         "asleep": "asleep",
@@ -77,6 +78,7 @@ REPORT_LABELS = {
         "activity": "🚶 กิจกรรม",
         "todays_focus": "🎯 โฟกัสวันนี้",
         "steps_7day": "🚶 ก้าวเดิน · 7 วัน",
+        "sleep_7day": "🛌 การนอน · 7 วัน",
         "weekly_averages": "📈 ค่าเฉลี่ยรายสัปดาห์",
         "key_insight": "💡 ข้อสังเกตสำคัญ",
         "asleep": "หลับ",
@@ -437,18 +439,26 @@ def build_daily_report_bubble(*, date_label: str, color: str,
 def build_weekly_report_bubble(*, range_label: str, color: str,
                                steps_series: list[tuple[str, float]],
                                average_rows: list[tuple[str, str, dict | None]],
-                               narrative: str, labels: dict | None = None) -> dict:
-    """Weekly report card: a 7-day steps bar chart, weekly averages with
-    week-over-week trend chips, and a Gemini 'Key Insight' narrative.
+                               narrative: str, labels: dict | None = None,
+                               sleep_series: list[tuple[str, float]] | None = None) -> dict:
+    """Weekly report card: 7-day steps + sleep bar charts, weekly averages
+    with week-over-week trend chips, and a Gemini 'Key Insight' narrative.
 
     `labels` is a localized REPORT_LABELS[...] set (defaults to English)."""
     L = labels or REPORT_LABELS["en"]
     body: list[dict] = []
 
-    chart = _mini_bar_chart(steps_series) if steps_series else []
-    if chart:
+    steps_chart = _mini_bar_chart(steps_series) if steps_series else []
+    if steps_chart:
         body.append(_section_label(L["steps_7day"], color))
-        body += chart
+        body += steps_chart
+
+    sleep_chart = _mini_bar_chart(sleep_series) if sleep_series else []
+    if sleep_chart:
+        if body:
+            body.append({"type": "separator", "margin": "lg"})
+        body.append(_section_label(L["sleep_7day"], color))
+        body += sleep_chart
 
     if average_rows:
         if body:
